@@ -10,7 +10,7 @@
     "lint": "ng lint",
     "e2e": "ng build --configuration production && concurrently \"serve dist/browser -l 4210 --no-clipboard --single\" \"protractor e2e/protractor.conf.js --baseUrl=http://localhost:4210\" --kill-others --success first"
   },
-  "packageManager": "pnpm@11.3.0",
+  "packageManager": "pnpm@11.5.0",
   "private": true,
   "dependencies": {
     "@angular/animations": "link:./in-existing-linked-by-bazel",
@@ -31,7 +31,7 @@
     "@types/jasmine": "^6.0.0",
     "@types/jasminewd2": "^2.0.8",
     "@types/node": "^20.14.8",
-    "concurrently": "9.2.1",
+    "concurrently": "10.0.0",
     "jasmine-core": "6.2.0",
     "serve": "^14.2.5",
     "jasmine-spec-reporter": "~7.0.0",
