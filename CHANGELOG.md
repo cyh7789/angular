@@ -1,3 +1,23 @@
+<a name="19.2.25"></a>
+# 19.2.25 (2026-06-02)
+### platform-server
+| Commit | Type | Description |
+| -- | -- | -- |
+| [e2fb854d55](https://github.com/angular/angular/commit/e2fb854d55484c87ec6b3d5e9e2e512325b389dc) | fix | throw on suspicious URLs and restrict protocol-relative URLs |
+| [0a8befb493](https://github.com/angular/angular/commit/0a8befb493e6defe033e7dabfd6462d6378c1f81) | fix | update domino to latest version |
+
+<!-- CHANGELOG SPLIT MARKER -->
+
+<a name="20.3.24"></a>
+# 20.3.24 (2026-06-02)
+### platform-server
+| Commit | Type | Description |
+| -- | -- | -- |
+| [6ca433e56b](https://github.com/angular/angular/commit/6ca433e56bcf74fdb6ad01d3afdf59628fba69b6) | fix | throw on suspicious URLs and restrict protocol-relative URLs |
+| [8680b5152f](https://github.com/angular/angular/commit/8680b5152fe58ebde81e331b74ba806fc86514cc) | fix | update domino to latest version |
+
+<!-- CHANGELOG SPLIT MARKER -->
+
 <a name="22.0.0-rc.3"></a>
 # 22.0.0-rc.3 (2026-06-01)
 ### common
