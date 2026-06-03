@@ -1,62 +1,54 @@
+import {Component, computed, input, model, output, signal, viewChild} from '@angular/core';
+import {FormValueControl, ValidationError} from '@angular/forms/signals';
 import {Combobox, ComboboxPopup, ComboboxWidget} from '@angular/aria/combobox';
 import {Listbox, Option} from '@angular/aria/listbox';
 import {OverlayModule} from '@angular/cdk/overlay';
-import {afterRenderEffect, Component, computed, effect, signal, viewChild} from '@angular/core';
-import {FormsModule} from '@angular/forms';
 
 @Component({
-  selector: 'app-root[theme="highlight-basic"], app-root:not([theme])',
-  templateUrl: 'app.html',
-  styleUrl: 'app.css',
-  imports: [Combobox, ComboboxPopup, ComboboxWidget, Listbox, Option, OverlayModule, FormsModule],
+  selector: 'country-selector',
+  templateUrl: 'country-selector.html',
+  styleUrl: 'country-selector.css',
+  imports: [Combobox, ComboboxPopup, ComboboxWidget, Listbox, Option, OverlayModule],
 })
-export class App {
-  clear() {
-    this.query.set('');
-    this.selectedOption.set([]);
-    this.popupExpanded.set(false);
-    this.navigated.set(false);
-  }
-
-  readonly listbox = viewChild(Listbox);
+export class CountrySelector implements FormValueControl<string> {
   readonly combobox = viewChild(Combobox);
 
+  // FormValueControl implementation
+  readonly value = model.required<string>();
+  readonly touched = input<boolean>(false);
+  readonly invalid = input<boolean>(false);
+  readonly errors = input<readonly ValidationError.WithOptionalFieldTree[]>([]);
+  readonly touch = output<void>();
+
   popupExpanded = signal(false);
-  query = signal('');
   selectedOption = signal<string[]>([]);
-  navigated = signal(false);
 
-  countries = computed(() =>
-    ALL_COUNTRIES.filter((country) => country.toLowerCase().startsWith(this.query().toLowerCase())),
-  );
-
-  constructor() {
-    afterRenderEffect(() => {
-      if (this.combobox()?.expanded() === true) {
-        this.listbox()?.scrollActiveItemIntoView();
-      }
-    });
-
-    effect(() => {
-      if (!this.popupExpanded()) {
-        this.navigated.set(false);
-      }
-    });
-  }
+  filteredCountries = computed(() => {
+    const query = this.value()?.toLowerCase() ?? '';
+    return ALL_COUNTRIES.filter((c) => c.toLowerCase().startsWith(query));
+  });
 
   onCommit() {
     const selected = this.selectedOption();
     if (selected.length > 0) {
-      this.query.set(selected[0]);
-    } else {
-      this.query.set('');
+      this.value.set(selected[0]);
     }
+
+    // Notify the parent form field directive that this control has been interacted with
+    this.touch.emit();
+
     this.popupExpanded.set(false);
     this.combobox()?.element.focus();
   }
+
+  clear() {
+    this.value.set('');
+    this.selectedOption.set([]);
+    this.popupExpanded.set(false);
+  }
 }
 
-const ALL_COUNTRIES = [
+export const ALL_COUNTRIES = [
   'Afghanistan',
   'Albania',
   'Algeria',
