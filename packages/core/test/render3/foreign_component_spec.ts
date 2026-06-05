@@ -6,11 +6,16 @@
  * found in the LICENSE file at https://angular.dev/license
  */
 
-import {ɵɵforeignComponent} from '../../src/render3/instructions/foreign_component';
+import {
+  ɵɵforeignComponent,
+  ɵɵforeignContent,
+} from '../../src/render3/instructions/foreign_component';
 import {foreignImport} from '../../src/render3/foreign_import';
 import {destroyLView} from '../../src/render3/node_manipulation';
 import {ViewFixture} from './view_fixture';
+import {ɵɵdomTemplate} from '../../src/render3/instructions/template';
 import {ɵɵelement, ɵɵelementEnd, ɵɵelementStart} from '../../src/render3/instructions/element';
+import {ɵɵtext} from '../../src/render3/instructions/text';
 import {inject, InjectionToken} from '../../src/di';
 import {ɵɵdefineDirective} from '../../src/render3/definition';
 import {ɵɵProvidersFeature} from '../../src/render3/features/providers_feature';
@@ -203,6 +208,88 @@ describe('ɵɵforeignComponent', () => {
     const host2 = renderSecondInstance(fixture);
     expect(fixture.host.innerHTML).toContain(expectedHtml);
     expect(host2.innerHTML).toContain(expectedHtml);
+  });
+
+  it('should support passing ɵɵforeignContent to props', () => {
+    const foreignComp = foreignImport<{
+      icon: Node[];
+      description: Node[];
+      children: Node[];
+    }>((props) => {
+      const div = document.createElement('div');
+      div.id = 'container';
+
+      const iconContainer = document.createElement('div');
+      iconContainer.id = 'icon-container';
+      for (const child of props.icon) {
+        iconContainer.appendChild(child);
+      }
+      div.appendChild(iconContainer);
+
+      const descContainer = document.createElement('div');
+      descContainer.id = 'desc-container';
+      for (const child of props.description) {
+        descContainer.appendChild(child);
+      }
+      div.appendChild(descContainer);
+
+      const mainChildren = document.createElement('div');
+      mainChildren.id = 'children-container';
+      for (const child of props.children) {
+        mainChildren.appendChild(child);
+      }
+      div.appendChild(mainChildren);
+
+      return [[div]];
+    });
+
+    const iconTemplate = (rf: number, ctx: any) => {
+      if (rf & 1) {
+        ɵɵelementStart(0, 'span');
+        ɵɵtext(1, 'Icon Content');
+        ɵɵelementEnd();
+      }
+    };
+
+    const descriptionTemplate = (rf: number, ctx: any) => {
+      if (rf & 1) {
+        ɵɵelementStart(0, 'p');
+        ɵɵtext(1, 'Description Content');
+        ɵɵelementEnd();
+      }
+    };
+
+    const childrenTemplate = (rf: number, ctx: any) => {
+      if (rf & 1) {
+        ɵɵelementStart(0, 'span');
+        ɵɵtext(1, 'Main Children Content');
+        ɵɵelementEnd();
+      }
+    };
+
+    const fixture = new ViewFixture({
+      decls: 4,
+      vars: 0,
+      create: () => {
+        ɵɵdomTemplate(0, iconTemplate, 2, 0);
+        ɵɵdomTemplate(1, descriptionTemplate, 2, 0);
+        ɵɵdomTemplate(2, childrenTemplate, 2, 0);
+        ɵɵforeignComponent(3, foreignComp, {
+          icon: ɵɵforeignContent(0),
+          description: ɵɵforeignContent(1),
+          children: ɵɵforeignContent(2),
+        });
+      },
+    });
+
+    expect(fixture.host.innerHTML).toContain(
+      '' +
+        '<div id="container">' +
+        '<div id="icon-container"><span>Icon Content</span></div>' +
+        '<div id="desc-container"><p>Description Content</p></div>' +
+        '<div id="children-container"><span>Main Children Content</span></div>' +
+        '</div>',
+    );
   });
 });
 
