@@ -156,7 +156,7 @@ function reifyCreateOperations(unit: CompilationUnit, ops: ir.OpList<ir.CreateOp
             : null;
         ir.OpList.replace(
           op,
-          ng.foreignComponent(op.handle.slot!, op.foreignComponentRef, propsExpr, op.sourceSpan),
+          ng.foreignComponent(op.handle.slot!, o.literal(op.constIndex), propsExpr, op.sourceSpan),
         );
         break;
       case ir.OpKind.ElementEnd:
@@ -800,9 +800,16 @@ function reifyIrExpression(unit: CompilationUnit, expr: o.Expression): o.Express
     case ir.ExpressionKind.Reference:
       return ng.reference(expr.targetSlot.slot! + 1 + expr.offset);
     case ir.ExpressionKind.ForeignContent:
-      return o
-        .importExpr(Identifiers.foreignContent)
-        .callFn([o.literal(expr.childrenViewHandle.slot!)]);
+      if (!(unit instanceof ViewCompilationUnit)) {
+        throw new Error(`AssertionError: must be compiling a component`);
+      }
+      const isFn = unit.job.views.get(expr.childrenViewXref)!.contextVariables.size > 0;
+      const slot = o.literal(expr.childrenViewHandle.slot!);
+      return isFn
+        ? o
+            .importExpr(Identifiers.foreignContentFn)
+            .callFn([slot, o.literal(expr.foreignComponentConstIndex)])
+        : o.importExpr(Identifiers.foreignContent).callFn([slot]);
     case ir.ExpressionKind.LexicalRead:
       throw new Error(`AssertionError: unresolved LexicalRead of ${expr.name}`);
     case ir.ExpressionKind.TwoWayBindingSet:
