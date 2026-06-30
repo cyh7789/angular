@@ -57,6 +57,25 @@ The `ResourceLoaderParams` object contains three properties: `params`, `previous
 
 If the `params` computation returns `undefined`, the loader function does not run and the resource status becomes `'idle'`.
 
+### Streaming resources
+
+Some asynchronous data sources produce multiple values over time instead of returning a single result. Examples include WebSockets, Server-Sent Events (SSE), and Firestore `onSnapshot` listeners.
+
+Use `stream` for these continuously updating data sources. Unlike `loader`, which resolves once for each request, `stream` returns a signal whose value can continue to update as new data becomes available.
+
+Use `loader` for one-time asynchronous operations, such as fetching data from an HTTP endpoint.
+
+```typescript
+const userUpdates = signal({value: 'Alice'});
+
+const userResource = resource({
+  stream: () => userUpdates,
+});
+
+// Later, when new data arrives:
+userUpdates.set({value: 'Bob'});
+```
+
 ### Aborting requests
 
 A resource aborts an outstanding loading operation if the `params` computation changes while the resource is loading.
