@@ -6,11 +6,11 @@
   "homepage": "https://github.com/angular/angular",
   "bugs": "https://github.com/angular/angular/issues",
   "license": "MIT",
-  "packageManager": "pnpm@11.8.0",
+  "packageManager": "pnpm@11.9.0",
   "engines": {
     "npm": "Please use pnpm instead of NPM to install dependencies",
     "yarn": "Please use pnpm instead of Yarn to install dependencies",
-    "pnpm": "11.8.0"
+    "pnpm": "11.9.0"
   },
   "repository": {
     "type": "git",
@@ -150,7 +150,7 @@
     "adm-zip": "^0.5.10",
     "cldr": "8.0.0",
     "cldrjs": "0.5.5",
-    "conventional-changelog": "^7.0.0",
+    "conventional-changelog": "^8.0.0",
     "cypress": "15.17.0",
     "firebase-tools": "^15.0.0",
     "get-tsconfig": "^4.10.1",
