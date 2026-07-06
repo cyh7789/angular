@@ -15,7 +15,7 @@
     "zone.js": "0.16.2"
   },
   "devDependencies": {
-    "@babel/core": "7.29.7",
+    "@babel/core": "8.0.1",
     "@rollup/plugin-babel": "^7.0.0",
     "@rollup/plugin-node-resolve": "^16.0.0",
     "@types/jasmine": "^6.0.0",
@@ -33,5 +33,5 @@
     "protractor": "protractor e2e/protractor.config.js"
   },
   "private": true,
-  "packageManager": "pnpm@11.9.0"
+  "packageManager": "pnpm@11.10.0"
 }
