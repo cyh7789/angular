@@ -36,6 +36,23 @@ function TestCmpRenderProps_Items_0_Template(rf, ctx) {
   }
 }
 
+function TestCmpConditional_Conditional_0_Conditional_0_Template(rf, ctx) {
+  if (rf & 1) {
+    const ctx_r0 = i0.ɵɵnextContext(2);
+    i0.ɵɵforeignComponent(0, 0, { label: ctx_r0.title });
+  }
+}
+
+function TestCmpConditional_Conditional_0_Template(rf, ctx) {
+  if (rf & 1) {
+    i0.ɵɵconditionalCreate(0, TestCmpConditional_Conditional_0_Conditional_0_Template, 1, 0);
+  }
+  if (rf & 2) {
+    const ctx_r0 = i0.ɵɵnextContext();
+    i0.ɵɵconditional(ctx_r0.innerCondition ? 0 : -1);
+  }
+}
+
 …
 
 export class TestCmp {
@@ -94,4 +111,27 @@ export class TestCmpRenderProps {
     encapsulation: 2
   });
 }
+
+…
+
+export class TestCmpConditional {
+  // ...
+  static ɵcmp = /*@__PURE__*/ i0.ɵɵdefineComponent({
+    type: TestCmpConditional,
+    selectors: [["main-conditional"]],
+    decls: 1,
+    vars: 1,
+    consts: [frameworkImport(FancyButton)],
+    template: function TestCmpConditional_Template(rf, ctx) {
+      if (rf & 1) {
+        i0.ɵɵconditionalCreate(0, TestCmpConditional_Conditional_0_Template, 1, 1);
+      }
+      if (rf & 2) {
+        i0.ɵɵconditional(ctx.outerCondition ? 0 : -1);
+      }
+    },
+    encapsulation: 2
+  });
+}
+
 
