@@ -1,3 +1,89 @@
+<a name="22.1.0-next.6"></a>
+# 22.1.0-next.6 (2026-07-15)
+### common
+| Commit | Type | Description |
+| -- | -- | -- |
+| [359fb503b8](https://github.com/angular/angular/commit/359fb503b8f262db7a053febc18c416f966e8185) | fix | avoid prototype lookups in date format caches |
+### compiler
+| Commit | Type | Description |
+| -- | -- | -- |
+| [da52137724](https://github.com/angular/angular/commit/da52137724b8cce79b036026fa1aa07bc730389c) | fix | parsing of an empty template literal interpolation |
+| [5bd00add07](https://github.com/angular/angular/commit/5bd00add071e404ddab318eea82db81b5715a194) | fix | support foreign components inside control flow blocks ([#69674](https://github.com/angular/angular/pull/69674)) |
+| [2e442f7876](https://github.com/angular/angular/commit/2e442f787627a1f44d8b6463a1cb979ef6f7e049) | perf | do not emit tag name when control flow root is foreign component ([#69674](https://github.com/angular/angular/pull/69674)) |
+### compiler-cli
+| Commit | Type | Description |
+| -- | -- | -- |
+| [ae0ec7315c](https://github.com/angular/angular/commit/ae0ec7315c6fbc45ce40581a08a8243a008a91ec) | fix | re-tag SourceFiles after TsCreateProgramDriver.updateFiles() |
+### core
+| Commit | Type | Description |
+| -- | -- | -- |
+| [9b9b0e93c9](https://github.com/angular/angular/commit/9b9b0e93c90c0ecfc7f075a64908cce00eb03f38) | fix | allow static attributes for explicit input transforms |
+| [68ac204074](https://github.com/angular/angular/commit/68ac20407466f0d3e6f5c5016f1273672b5d2b34) | fix | ignore processing instruction syntax in templates |
+| [0ae6d81ed2](https://github.com/angular/angular/commit/0ae6d81ed2a83b1ebbb75dabc53af77b8db86c41) | fix | preserve explicit input transform write type |
+### forms
+| Commit | Type | Description |
+| -- | -- | -- |
+| [5cb8c733a3](https://github.com/angular/angular/commit/5cb8c733a39a0128eada61061e8d9ff352a967d0) | fix | allow multiple async validators |
+| [2e32872720](https://github.com/angular/angular/commit/2e32872720ee95f24029d20e24e91edbc2054b1e) | fix | preserve intermediate number values in signal forms |
+| [2e0cb52dbf](https://github.com/angular/angular/commit/2e0cb52dbf0f519ffc5c99b95e5f4b965fa332a7) | fix | prevent stale CVA writeback during debounce |
+### http
+| Commit | Type | Description |
+| -- | -- | -- |
+| [6d043f8657](https://github.com/angular/angular/commit/6d043f86573e317f20039ccec031d6e63c01b656) | fix | prevent interceptor signal reads from leaking into calling reactive contexts |
+### localize
+| Commit | Type | Description |
+| -- | -- | -- |
+| [5de0ea5f23](https://github.com/angular/angular/commit/5de0ea5f23f12542ebdd9d28f225e1a224021d92) | fix | build runtime translations map with a null prototype |
+| [2a4f582731](https://github.com/angular/angular/commit/2a4f58273112d0ed508fac624e56f56d97e511fa) | fix | use Object.hasOwn for placeholder lookup in translate |
+### platform-browser
+| Commit | Type | Description |
+| -- | -- | -- |
+| [fb6b354fbd](https://github.com/angular/angular/commit/fb6b354fbd3ecf6c2cdf211ca054fb44226e587b) | fix | prevent ReDoS in SOURCEMAP_URL_REGEXP |
+
+<!-- CHANGELOG SPLIT MARKER -->
+
+<a name="22.0.7"></a>
+# 22.0.7 (2026-07-15)
+### common
+| Commit | Type | Description |
+| -- | -- | -- |
+| [91e33aa1de](https://github.com/angular/angular/commit/91e33aa1de47d250d8cde21047597e8df771f07d) | fix | avoid prototype lookups in date format caches |
+### compiler
+| Commit | Type | Description |
+| -- | -- | -- |
+| [5b516e3a58](https://github.com/angular/angular/commit/5b516e3a58e1233f2e01cbb53267b9563a72d5f1) | fix | parsing of an empty template literal interpolation |
+### compiler-cli
+| Commit | Type | Description |
+| -- | -- | -- |
+| [c88ddde1c9](https://github.com/angular/angular/commit/c88ddde1c9f56e3b5c5cf264e87217b86a036a58) | fix | re-tag SourceFiles after TsCreateProgramDriver.updateFiles() |
+### core
+| Commit | Type | Description |
+| -- | -- | -- |
+| [94d9591b51](https://github.com/angular/angular/commit/94d9591b512c94577080c77911dbd1c3516a8a81) | fix | allow static attributes for explicit input transforms |
+| [c89f71a74c](https://github.com/angular/angular/commit/c89f71a74ce312f9f6522796a106eac48bd33ebb) | fix | ignore processing instruction syntax in templates |
+| [70500e4067](https://github.com/angular/angular/commit/70500e4067e74e5b5f79a15774b5d2f01524f397) | fix | preserve explicit input transform write type |
+### forms
+| Commit | Type | Description |
+| -- | -- | -- |
+| [1b9964675f](https://github.com/angular/angular/commit/1b9964675f0cfee30a0e8f6df664d1961a3dc3ae) | fix | allow multiple async validators |
+| [64d6d47a0c](https://github.com/angular/angular/commit/64d6d47a0c67709ce887a90666fc214c40a283c4) | fix | preserve intermediate number values in signal forms |
+| [6cf7446afa](https://github.com/angular/angular/commit/6cf7446afaedd461b9e28291e326f6f2372fa157) | fix | prevent stale CVA writeback during debounce |
+### http
+| Commit | Type | Description |
+| -- | -- | -- |
+| [20b7dc3023](https://github.com/angular/angular/commit/20b7dc3023df9ccde232cf9fef1d2b1d3ae68b23) | fix | prevent interceptor signal reads from leaking into calling reactive contexts |
+### localize
+| Commit | Type | Description |
+| -- | -- | -- |
+| [22d5a091d1](https://github.com/angular/angular/commit/22d5a091d10ac70ece469a4bf69b03c51805614b) | fix | build runtime translations map with a null prototype |
+| [8ce1fcf7fa](https://github.com/angular/angular/commit/8ce1fcf7faef3ef4b3612e0faeac2701a82c5434) | fix | use Object.hasOwn for placeholder lookup in translate |
+### platform-browser
+| Commit | Type | Description |
+| -- | -- | -- |
+| [b34bf0dce8](https://github.com/angular/angular/commit/b34bf0dce855bca3c6dfcf7e19d38b3b39288a16) | fix | prevent ReDoS in SOURCEMAP_URL_REGEXP |
+
+<!-- CHANGELOG SPLIT MARKER -->
+
 <a name="20.3.26"></a>
 # 20.3.26 (2026-07-08)
 ### compiler-cli
