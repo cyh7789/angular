@@ -6,40 +6,40 @@ module(
 
 bazel_dep(name = "rules_pkg", version = "1.2.0")
 bazel_dep(name = "rules_nodejs", version = "6.7.5")
-bazel_dep(name = "aspect_rules_ts", version = "3.8.11")
-bazel_dep(name = "aspect_rules_js", version = "3.2.2")
+bazel_dep(name = "aspect_rules_ts", version = "3.9.2")
+bazel_dep(name = "aspect_rules_js", version = "3.2.3")
 bazel_dep(name = "aspect_rules_esbuild", version = "0.26.0")
 bazel_dep(name = "aspect_rules_jasmine", version = "2.0.4")
 bazel_dep(name = "aspect_rules_rollup", version = "2.0.1")
 bazel_dep(name = "bazel_skylib", version = "1.9.0")
-bazel_dep(name = "bazel_lib", version = "3.4.0")
-bazel_dep(name = "tar.bzl", version = "0.10.5")
+bazel_dep(name = "bazel_lib", version = "3.5.0")
+bazel_dep(name = "tar.bzl", version = "0.10.7")
 bazel_dep(name = "yq.bzl", version = "0.3.6")
 bazel_dep(name = "rules_angular")
 git_override(
     module_name = "rules_angular",
-    commit = "50b8a6daa50cfbbab422d5f29f85c40128e10fd1",
+    commit = "0915e81f92573e8e56aeb1d680187b77f895d2bb",
     remote = "https://github.com/angular/rules_angular.git",
 )
 
 bazel_dep(name = "devinfra")
 git_override(
     module_name = "devinfra",
-    commit = "9d539d3fc5e3ab718830b2ab8ffa4d97d2f0afb2",
+    commit = "7365173626bd7f475d30ba010bfb0e485233b199",
     remote = "https://github.com/angular/dev-infra.git",
 )
 
 bazel_dep(name = "rules_sass")
 git_override(
     module_name = "rules_sass",
-    commit = "42ecdac4f15dc5a7643d516a0280fd007b22ce51",
+    commit = "f153cb9242233738c3e6eca6554ae4cb864b0def",
     remote = "https://github.com/angular/rules_sass.git",
 )
 
 bazel_dep(name = "rules_browsers")
 git_override(
     module_name = "rules_browsers",
-    commit = "b7be6ff1a213baece2fb729ea0ae5809a772ee59",
+    commit = "d04bba5139be8e154f1f0e6a0c76f95cd5f40fa2",
     remote = "https://github.com/angular/rules_browsers.git",
 )
 
@@ -71,8 +71,8 @@ use_repo(node, "nodejs_windows_amd64")
 pnpm = use_extension("@aspect_rules_js//npm:extensions.bzl", "pnpm")
 pnpm.pnpm(
     name = "pnpm",
-    pnpm_version = "11.13.0",
-    pnpm_version_integrity = "sha512-iNlHJNjy5sGGdEpVhMblnsrIaex7oV6ctM1ijo3HBmggskgdjuO1HqjaMjpzeAaKpYxVajcg0yt8IKBR0Ig2Og==",
+    pnpm_version = "11.15.1",
+    pnpm_version_integrity = "sha512-gTULB+U8lTigLx8jA7QpD6LXvgTlbiqXDEzEtBfcdh3hlu2r1J1Vx9yVgNuBAHxEFD5OPX5GKzAA0jwlUSLQZQ==",
 )
 use_repo(pnpm, "pnpm")
 
