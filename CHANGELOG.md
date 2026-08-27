@@ -1,3 +1,113 @@
+<a name="22.2.0-next.4"></a>
+# 22.2.0-next.4 (2026-08-26)
+### common
+| Commit | Type | Description |
+| -- | -- | -- |
+| [862a0c8ab3](https://github.com/angular/angular/commit/862a0c8ab3403242eeac3b2fb80f7cf63cf0c892) | fix | avoid prototype member collisions |
+| [7596548e9b](https://github.com/angular/angular/commit/7596548e9b836a5d12e966bf296a4dbba044b78f) | fix | use locale NaN symbol in number formatting |
+### compiler
+| Commit | Type | Description |
+| -- | -- | -- |
+| [58b0cb4735](https://github.com/angular/angular/commit/58b0cb47358861de0a512711addb8e29f984a57e) | fix | scope animations declared in minified nested rules |
+### compiler-cli
+| Commit | Type | Description |
+| -- | -- | -- |
+| [7d9f55da11](https://github.com/angular/angular/commit/7d9f55da11319da8f273d9edcd38ff2983bdbb0c) | feat | scope type-checking of keyed defer blocks |
+| [2e2c426e76](https://github.com/angular/angular/commit/2e2c426e7609de551dafb6360e6373333a278c4e) | fix | deduplicate deferred imports across multiple blocks |
+| [a46292af26](https://github.com/angular/angular/commit/a46292af260f241da2f9f4e4cbb7d40b14a678f1) | fix | default template diagnostic related message source file to template |
+| [e9ba39d671](https://github.com/angular/angular/commit/e9ba39d671a3645ef5ca8233c96bacc94f02d155) | fix | Produce correct tcb expression for optional chaining |
+| [74b294cd51](https://github.com/angular/angular/commit/74b294cd51b0f73e3a71e0cd13a176b1d0f3a89f) | fix | retain metadata for strict standalone errors |
+### core
+| Commit | Type | Description |
+| -- | -- | -- |
+| [7ba082e08e](https://github.com/angular/angular/commit/7ba082e08e59eadec4594ad80661d5c1ec08cb2a) | fix | avoid prototype member collisions |
+| [915a03ae85](https://github.com/angular/angular/commit/915a03ae856a595bd5fa0f364928869db8daec19) | fix | explicitly reject foreign components in JIT mode |
+| [2ab5ff56de](https://github.com/angular/angular/commit/2ab5ff56ded8c6246c0035d9df62a0c7fc9e1308) | fix | preserve namespace for dynamic component hosts |
+| [168a324cce](https://github.com/angular/angular/commit/168a324cce0f133ed92953374c2510a75868b790) | fix | prevent TransferState prototype pollution |
+| [83f7695b2e](https://github.com/angular/angular/commit/83f7695b2e4e1cab347f7817da4ae4262dade415) | fix | throw coded RuntimeErrors instead of crashing when hydration/rendering can&apos;t find an expected DOM node |
+### forms
+| Commit | Type | Description |
+| -- | -- | -- |
+| [1e35de536d](https://github.com/angular/angular/commit/1e35de536d8332dfcbb3d89d01ca84b50aa56bd2) | fix | use dot-access for readonly rule configuration |
+### language-service
+| Commit | Type | Description |
+| -- | -- | -- |
+| [0f0d52e9c1](https://github.com/angular/angular/commit/0f0d52e9c1154f8db9a4a8d9d0ff73f0afdc7031) | fix | honor quote style preference when generating imports |
+### migrations
+| Commit | Type | Description |
+| -- | -- | -- |
+| [bdc09e8183](https://github.com/angular/angular/commit/bdc09e8183a3280d25bfc93b4d5ae4452cc551ec) | fix | preserve registerLocaleData calls in standalone bootstrap migration |
+### platform-server
+| Commit | Type | Description |
+| -- | -- | -- |
+| [3e924cc8db](https://github.com/angular/angular/commit/3e924cc8dbbb57f23b262cb8f0d7e2bd0673034c) | fix | avoid stripping unicode whitespace during url resolution |
+
+<!-- CHANGELOG SPLIT MARKER -->
+
+<a name="22.1.4"></a>
+# 22.1.4 (2026-08-26)
+### common
+| Commit | Type | Description |
+| -- | -- | -- |
+| [60a874c3fb](https://github.com/angular/angular/commit/60a874c3fbedc2ce216bcf783325f4e1291edcb0) | fix | avoid prototype member collisions |
+| [e8378dfeab](https://github.com/angular/angular/commit/e8378dfeab39fca5bcdc47126b7859c8fdab7a28) | fix | use locale NaN symbol in number formatting |
+### compiler
+| Commit | Type | Description |
+| -- | -- | -- |
+| [05c7c725a5](https://github.com/angular/angular/commit/05c7c725a534f4ea14c718503966423133474bbf) | fix | scope animations declared in minified nested rules |
+### compiler-cli
+| Commit | Type | Description |
+| -- | -- | -- |
+| [afe8499a14](https://github.com/angular/angular/commit/afe8499a14c1bf8ab42e6e30b35917a873745540) | fix | default template diagnostic related message source file to template |
+| [079a846263](https://github.com/angular/angular/commit/079a846263599daf38cc1903c46ccea99c5758f8) | fix | Produce correct tcb expression for optional chaining |
+| [55eeb46418](https://github.com/angular/angular/commit/55eeb46418080e2faf64c84eac389c21abea6df8) | fix | retain metadata for strict standalone errors |
+### core
+| Commit | Type | Description |
+| -- | -- | -- |
+| [3da35cbab9](https://github.com/angular/angular/commit/3da35cbab94777230871a3e9289455089b80fe7f) | fix | avoid prototype member collisions |
+| [b199bdfa2a](https://github.com/angular/angular/commit/b199bdfa2ad8b3fe189e7b4cef9dbea600cd4732) | fix | explicitly reject foreign components in JIT mode |
+| [9a8e4826b9](https://github.com/angular/angular/commit/9a8e4826b9db4359c3f0e7185e9582b7bd08a3ef) | fix | preserve namespace for dynamic component hosts |
+| [7c752d4815](https://github.com/angular/angular/commit/7c752d4815db41ee04e43d38cc826dd63214432b) | fix | prevent TransferState prototype pollution |
+| [7546b7a805](https://github.com/angular/angular/commit/7546b7a80549c9620d52692cb0f5cab4c69b546c) | fix | throw coded RuntimeErrors instead of crashing when hydration/rendering can&apos;t find an expected DOM node |
+### forms
+| Commit | Type | Description |
+| -- | -- | -- |
+| [c8eb7f0056](https://github.com/angular/angular/commit/c8eb7f00564beceb21445b1f0374c93854b513d1) | fix | use dot-access for readonly rule configuration |
+### language-service
+| Commit | Type | Description |
+| -- | -- | -- |
+| [93d7f718d2](https://github.com/angular/angular/commit/93d7f718d2e057e37deda42d197e46672fe7f7f5) | fix | honor quote style preference when generating imports |
+### migrations
+| Commit | Type | Description |
+| -- | -- | -- |
+| [85c8829ac1](https://github.com/angular/angular/commit/85c8829ac189b0f47b865b036dad98905e576dc9) | fix | preserve registerLocaleData calls in standalone bootstrap migration |
+### platform-server
+| Commit | Type | Description |
+| -- | -- | -- |
+| [71e52d1396](https://github.com/angular/angular/commit/71e52d1396b9cef98652929b73e08c4cde645970) | fix | avoid stripping unicode whitespace during url resolution |
+
+<!-- CHANGELOG SPLIT MARKER -->
+
+<a name="21.2.22"></a>
+# 21.2.22 (2026-08-26)
+### platform-server
+| Commit | Type | Description |
+| -- | -- | -- |
+| [5aa6d97deb](https://github.com/angular/angular/commit/5aa6d97deb9ef1de14e23748b7fa74f97d183132) | fix | avoid stripping unicode whitespace during url resolution |
+| [73d8bbd27c](https://github.com/angular/angular/commit/73d8bbd27cb46495426d4132975a1355b47ad915) | fix | update domino to latest version |
+
+<!-- CHANGELOG SPLIT MARKER -->
+
+<a name="20.3.30"></a>
+# 20.3.30 (2026-08-26)
+### platform-server
+| Commit | Type | Description |
+| -- | -- | -- |
+| [9339a7a2de](https://github.com/angular/angular/commit/9339a7a2de437ed93f9cc3da7f32d0100412d599) | fix | avoid stripping unicode whitespace during url resolution |
+| [89b20568df](https://github.com/angular/angular/commit/89b20568dfaee1ec8e0b3bcf1872acdddd2f4fef) | fix | update domino to latest version |
+
+<!-- CHANGELOG SPLIT MARKER -->
+
 <a name="22.2.0-next.3"></a>
 # 22.2.0-next.3 (2026-08-19)
 ### animations
