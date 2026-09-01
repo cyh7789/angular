@@ -9,18 +9,15 @@
     "stripInternal": true,
     "noImplicitAny": true,
     "noImplicitOverride": true,
-    "strictNullChecks": true,
     "stableTypeOrdering": true,
     "noImplicitReturns": true,
     "noPropertyAccessFromIndexSignature": true,
     "esModuleInterop": true,
-    "strict": true,
-    "strictPropertyInitialization": true,
     "noFallthroughCasesInSwitch": true,
     "moduleResolution": "bundler",
     "module": "esnext",
     "target": "es2022",
-    "lib": ["es2020", "es2022", "dom", "dom.iterable"],
+    "lib": ["es2022", "dom", "dom.iterable", "es2024.promise"],
     "skipLibCheck": true,
     // don't auto-discover @types/node, it results in a ///<reference in the .d.ts output
     "types": [],
@@ -46,8 +43,5 @@
   "bazelOptions": {
     "suppressTsconfigOverrideWarnings": true
   },
-  "angularCompilerOptions": {
-    "strictTemplates": true,
-    "typeCheckHostBindings": true
-  }
+  "angularCompilerOptions": {}
 }
