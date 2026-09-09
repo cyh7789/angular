@@ -2359,7 +2359,6 @@ class EventCmp {
   selector: 'push-cmp',
   inputs: ['prop'],
   host: {'(click)': 'true'},
-  changeDetection: ChangeDetectionStrategy.OnPush,
   template:
     '{{field}}<div (click)="noop()"></div><div *ngIf="true" (click)="noop()"></div><event-cmp></event-cmp>',
   standalone: false,
@@ -2383,7 +2382,6 @@ class PushCmp {
 @Component({
   selector: 'push-cmp-with-ref',
   inputs: ['prop'],
-  changeDetection: ChangeDetectionStrategy.OnPush,
   template: '{{field}}',
   standalone: false,
 })
@@ -2410,7 +2408,6 @@ class PushCmpWithRef {
 @Component({
   selector: 'push-cmp-with-host-event',
   host: {'(click)': 'ctxCallback($event)'},
-  changeDetection: ChangeDetectionStrategy.OnPush,
   template: '',
   standalone: false,
 })
@@ -2420,19 +2417,16 @@ class PushCmpWithHostEvent {
 
 @Component({
   selector: 'push-cmp-with-async',
-  changeDetection: ChangeDetectionStrategy.OnPush,
   template: '{{field | async}}',
   standalone: false,
 })
 class PushCmpWithAsyncPipe {
   numberOfChecks: number = 0;
-  resolve!: (result: any) => void;
+  resolve: (result: any) => void;
   promise: Promise<any>;
 
   constructor() {
-    this.promise = new Promise((resolve) => {
-      this.resolve = resolve;
-    });
+    ({promise: this.promise, resolve: this.resolve} = Promise.withResolvers<any>());
   }
 
   get field() {

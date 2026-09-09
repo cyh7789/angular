@@ -19,7 +19,6 @@ import {ActivatedRoute, ActivatedRouteSnapshot, initializeActivatedRoute} from '
 import {TreeNode} from '../utils/tree';
 import {
   BLOCKING_SYMBOL,
-  hasValueOrResolved,
   InternalRouterResource,
   routerResource,
   SOURCE_RESOURCE_SYMBOL,
@@ -108,7 +107,6 @@ async function setupNewRouterResources(
     queryParams: route.queryParamsSignal,
     fragment: route.fragmentSignal,
     data: route.dataSignal,
-    snapshot: route._futureSnapshot,
   };
 
   const resourceResultRaw = runInInjectionContext(childInjector, () => resourcesFn(context));
@@ -214,7 +212,7 @@ function setupBlocking(
           if (status === 'error') {
             cleanup();
             reject(underlyingRes.error());
-          } else if (hasValueOrResolved(underlyingRes)) {
+          } else if (!underlyingRes.isLoading()) {
             cleanup();
             resolve();
           }
