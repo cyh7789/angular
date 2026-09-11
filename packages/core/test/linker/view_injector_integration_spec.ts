@@ -248,6 +248,7 @@ class DirectiveNeedsChangeDetectorRef {
 @Component({
   selector: '[componentNeedsChangeDetectorRef]',
   template: '{{counter}}',
+  // Until #69898 lands we need to explicit OnPush
   changeDetection: ChangeDetectionStrategy.OnPush,
   standalone: false,
 })
