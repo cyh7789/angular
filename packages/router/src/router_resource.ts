@@ -33,20 +33,12 @@ import {
   NavigationCancellationCode,
 } from './events';
 
-export const BLOCKING_SYMBOL: unique symbol = Symbol(
+export const BLOCKING_SYMBOL: unique symbol = /* @__PURE__ */ Symbol(
   typeof ngDevMode === 'undefined' || ngDevMode ? '__isBlocking' : '',
 );
-export const SOURCE_RESOURCE_SYMBOL: unique symbol = Symbol(
+export const SOURCE_RESOURCE_SYMBOL: unique symbol = /* @__PURE__ */ Symbol(
   typeof ngDevMode === 'undefined' || ngDevMode ? '__sourceResource' : '',
 );
-
-/**
- * Checks if a resource has a value or has transitioned to a resolved/non-loading status.
- */
-export function hasValueOrResolved(res: Resource<unknown>): boolean {
-  const status = res.status();
-  return res.hasValue() || (status !== 'loading' && status !== 'reloading');
-}
 
 /**
  * @internal
@@ -169,7 +161,7 @@ function createTransactionalSnapshot<T>(
 
   effect(
     () => {
-      if (isRollbackRecoveryPending() && hasValueOrResolved(source)) {
+      if (isRollbackRecoveryPending() && !source.isLoading()) {
         isRollbackRecoveryPending.set(false);
         frozenSnapshot.set(null);
       }
