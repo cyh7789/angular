@@ -72,9 +72,12 @@ describe('Animation', () => {
   });
 
   describe('animate.leave', () => {
+    // These durations only have to outlast the test: every spec below completes the animation by
+    // dispatching a synthetic `animationend`. Keeping them long stops the real animation from
+    // ending first and stripping the classes before the assertions run on a loaded machine.
     const styles = `
     .fade {
-      animation: fade-out 1ms;
+      animation: fade-out 250ms;
     }
     @keyframes fade-out {
       from {
@@ -177,10 +180,10 @@ describe('Animation', () => {
     it('should support string arrays', async () => {
       const multiple = `
         .slide-out {
-          animation: slide-out 2ms;
+          animation: slide-out 500ms;
         }
         .fade {
-          animation: fade-out 1ms;
+          animation: fade-out 250ms;
         }
         @keyframes slide-out {
           from {
@@ -241,10 +244,10 @@ describe('Animation', () => {
     it('should support binding strings with spaces', async () => {
       const multiple = `
         .slide-out {
-          animation: slide-out 2ms;
+          animation: slide-out 500ms;
         }
         .fade {
-          animation: fade-out 1ms;
+          animation: fade-out 250ms;
         }
         @keyframes slide-out {
           from {
@@ -307,10 +310,10 @@ describe('Animation', () => {
     it('should support multiple classes as a single string with spaces', async () => {
       const multiple = `
         .slide-out {
-          animation: slide-out 2ms;
+          animation: slide-out 500ms;
         }
         .fade {
-          animation: fade-out 1ms;
+          animation: fade-out 250ms;
         }
         @keyframes slide-out {
           from {
@@ -428,6 +431,7 @@ describe('Animation', () => {
       await fixture.whenStable();
       await nextAnimationFrame();
       expect(cmp.show()).toBeFalsy();
+      await fixture.whenStable();
       expect(fixture.nativeElement.outerHTML).toContain('class="fade"');
       await fixture.whenStable();
       fadeCmp.nativeElement.dispatchEvent(
@@ -472,6 +476,7 @@ describe('Animation', () => {
       await fixture.whenStable();
       await nextAnimationFrame();
       expect(cmp.show()).toBeFalsy();
+      await fixture.whenStable();
       expect(fixture.nativeElement.outerHTML).toContain('class="fade"');
       await fixture.whenStable();
       fadeCmp.nativeElement.dispatchEvent(
@@ -581,10 +586,10 @@ describe('Animation', () => {
     it('should compose class list when host binding and regular binding', async () => {
       const multiple = `
         .slide-out {
-          animation: slide-out 2ms;
+          animation: slide-out 500ms;
         }
         .fade {
-          animation: fade-out 1ms;
+          animation: fade-out 250ms;
         }
         @keyframes slide-out {
           from {
@@ -639,6 +644,7 @@ describe('Animation', () => {
       await fixture.whenStable();
       await nextAnimationFrame();
       expect(cmp.show()).toBeFalsy();
+      await fixture.whenStable();
       expect(childCmp.nativeElement.className).toContain('fade');
       expect(childCmp.nativeElement.className).toContain('slide-out');
 
@@ -658,10 +664,10 @@ describe('Animation', () => {
     it('should compose class list when host binding on a directive and regular binding', async () => {
       const multiple = `
         .slide-out {
-          animation: slide-out 2ms;
+          animation: slide-out 500ms;
         }
         .fade {
-          animation: fade-out 1ms;
+          animation: fade-out 250ms;
         }
         @keyframes slide-out {
           from {
@@ -735,10 +741,10 @@ describe('Animation', () => {
     it('should compose class list when host binding a string and regular class strings', async () => {
       const multiple = `
         .slide-out {
-          animation: slide-out 2ms;
+          animation: slide-out 500ms;
         }
         .fade {
-          animation: fade-out 1ms;
+          animation: fade-out 250ms;
         }
         @keyframes slide-out {
           from {
@@ -935,7 +941,7 @@ describe('Animation', () => {
 
       const styles = `
       .fade {
-        animation: fade-out 1ms;
+        animation: fade-out 250ms;
       }
       @keyframes fade-out {
         from {
@@ -991,12 +997,14 @@ describe('Animation', () => {
   });
 
   describe('animate.enter', () => {
+    // See the note on the `animate.leave` styles: the durations are long on purpose so that the
+    // real animation cannot finish before the specs assert on the classes.
     const styles = `
     .slide-in {
-      animation: slide-in 1ms;
+      animation: slide-in 250ms;
     }
     .fade-in {
-      animation: fade-in 2ms;
+      animation: fade-in 500ms;
     }
     @keyframes slide-in {
       from {
@@ -1208,10 +1216,10 @@ describe('Animation', () => {
     it('should support string arrays', async () => {
       const multiple = `
       .slide-in {
-        animation: slide-in 1ms;
+        animation: slide-in 250ms;
       }
       .fade-in {
-        animation: fade-in 2ms;
+        animation: fade-in 500ms;
       }
       @keyframes slide-in {
         from {
@@ -1265,10 +1273,10 @@ describe('Animation', () => {
     it('should support binding to a string with a space', async () => {
       const multiple = `
       .slide-in {
-        animation: slide-in 1ms;
+        animation: slide-in 250ms;
       }
       .fade-in {
-        animation: fade-in 2ms;
+        animation: fade-in 500ms;
       }
       @keyframes slide-in {
         from {
@@ -1324,10 +1332,10 @@ describe('Animation', () => {
     it('should support multiple classes as a single string separated by a space', async () => {
       const multiple = `
       .slide-in {
-        animation: slide-in 1ms;
+        animation: slide-in 250ms;
       }
       .fade-in {
-        animation: fade-in 2ms;
+        animation: fade-in 500ms;
       }
       @keyframes slide-in {
         from {
@@ -2223,10 +2231,196 @@ describe('Animation', () => {
 
       const fixture = TestBed.createComponent(TestComponent);
       const cmp = fixture.componentInstance;
+      await fixture.whenStable();
+      expect(
+        fixture.debugElement.queryAll(By.css('p')).map((p) => p.nativeElement.textContent.trim()),
+      ).toEqual(['1', '2', '3']);
+
       cmp.shuffle();
       await fixture.whenStable();
       expect(animateSpy).not.toHaveBeenCalled();
       expect(fixture.debugElement.queryAll(By.css('p')).length).toBe(3);
+      expect(
+        fixture.debugElement.queryAll(By.css('p')).map((p) => p.nativeElement.textContent.trim()),
+      ).toEqual(['2', '3', '1']);
+    });
+
+    it('should not remove elements when swapping or moving nodes inside nested embedded templates', async () => {
+      const animateSpy = jasmine.createSpy('animateSpy');
+      @Component({
+        selector: 'test-cmp',
+        template: `
+          <div>
+            @for (item of items; track item.id) {
+              @if (show) {
+                <p (animate.leave)="animate($event)" #el>{{ item.id }}</p>
+              }
+            }
+          </div>
+        `,
+        encapsulation: ViewEncapsulation.None,
+      })
+      class TestComponent {
+        items = [{id: 1}, {id: 2}, {id: 3}];
+        show = true;
+        private cd = inject(ChangeDetectorRef);
+
+        animate(event: AnimationCallbackEvent) {
+          animateSpy();
+          event.animationComplete();
+        }
+
+        shuffle() {
+          this.items = this.shuffleArray(this.items);
+          this.cd.markForCheck();
+        }
+
+        shuffleArray<T>(array: readonly T[]): T[] {
+          return [array[1], array[2], array[0]];
+        }
+      }
+      TestBed.configureTestingModule({animationsEnabled: true});
+
+      const fixture = TestBed.createComponent(TestComponent);
+      const cmp = fixture.componentInstance;
+      await fixture.whenStable();
+      expect(
+        fixture.debugElement.queryAll(By.css('p')).map((p) => p.nativeElement.textContent.trim()),
+      ).toEqual(['1', '2', '3']);
+
+      cmp.shuffle();
+      await fixture.whenStable();
+      expect(animateSpy).not.toHaveBeenCalled();
+      expect(fixture.debugElement.queryAll(By.css('p')).length).toBe(3);
+      expect(
+        fixture.debugElement.queryAll(By.css('p')).map((p) => p.nativeElement.textContent.trim()),
+      ).toEqual(['2', '3', '1']);
+    });
+
+    it('should not lose elements or throw when repeatedly swapping nodes with animate.enter and animate.leave inside nested @if', async () => {
+      const enterStyles = `
+        .enter {
+          animation: fade-in 500ms;
+        }
+        .leave {
+          animation: fade-out 500ms;
+        }
+        @keyframes fade-in {
+          from { opacity: 0; }
+          to { opacity: 1; }
+        }
+        @keyframes fade-out {
+          from { opacity: 1; }
+          to { opacity: 0; }
+        }
+      `;
+      @Component({
+        selector: 'test-cmp',
+        styles: [enterStyles],
+        template: `
+          <div>
+            @for (item of items; track item.name) {
+              @if (show) {
+                <div class="item" animate.enter="enter" animate.leave="leave">{{ item.name }}</div>
+              }
+            }
+          </div>
+        `,
+        encapsulation: ViewEncapsulation.None,
+      })
+      class TestComponent {
+        items = [{name: 'a'}, {name: 'b'}, {name: 'c'}];
+        show = true;
+        private cd = inject(ChangeDetectorRef);
+
+        swap() {
+          const a = this.items[0];
+          const b = this.items[1];
+          this.items[1] = a;
+          this.items[0] = b;
+          this.cd.markForCheck();
+        }
+      }
+      TestBed.configureTestingModule({animationsEnabled: true});
+
+      const fixture = TestBed.createComponent(TestComponent);
+      const cmp = fixture.componentInstance;
+      await fixture.whenStable();
+      await nextAnimationFrame();
+
+      // Perform multiple rapid swaps
+      cmp.swap();
+      await fixture.whenStable();
+      cmp.swap();
+      await fixture.whenStable();
+      cmp.swap();
+      await fixture.whenStable();
+
+      await nextAnimationFrame();
+      await timeout(800);
+
+      const divs = fixture.debugElement.queryAll(By.css('.item'));
+      expect(divs.length).toBe(3);
+      expect(divs.map((d) => d.nativeElement.textContent.trim())).toEqual(['b', 'a', 'c']);
+
+      // Ensure elements do not retain the leave class
+      for (const div of divs) {
+        expect(div.nativeElement.classList.contains('leave')).toBeFalse();
+      }
+    });
+
+    it('should remove leave class from component with projection when leave animation completes', async () => {
+      const styles = `
+        .leave {
+          animation: fade-out 500ms;
+        }
+        @keyframes fade-out {
+          from { opacity: 1; }
+          to { opacity: 0; }
+        }
+      `;
+      @Component({
+        selector: 'wrapper-cmp',
+        template: '<ng-content />',
+      })
+      class WrapperComponent {}
+
+      @Component({
+        selector: 'test-cmp',
+        styles: [styles],
+        imports: [WrapperComponent],
+        template: `
+          @if (show()) {
+            <wrapper-cmp animate.leave="leave" #wrapper>
+              <p>Projected Content</p>
+            </wrapper-cmp>
+          }
+        `,
+      })
+      class TestComponent {
+        show = signal(true);
+        @ViewChild('wrapper', {read: ElementRef}) wrapper!: ElementRef<HTMLElement>;
+      }
+
+      TestBed.configureTestingModule({animationsEnabled: true});
+      const fixture = TestBed.createComponent(TestComponent);
+      const cmp = fixture.componentInstance;
+      await fixture.whenStable();
+      await nextAnimationFrame();
+
+      const el = cmp.wrapper.nativeElement;
+      expect(el.classList.contains('leave')).toBeFalse();
+
+      cmp.show.set(false);
+      await fixture.whenStable();
+      await nextAnimationFrame();
+
+      expect(el.classList.contains('leave')).toBeTrue();
+
+      await nextAnimationFrame();
+      await timeout(500);
+
+      expect(el.classList.contains('leave')).toBeFalse();
     });
 
     it('should not remove elements when child element animations finish', async () => {
