@@ -72,6 +72,9 @@ export class Recognizer {
   private absoluteRedirectCount = 0;
   allowRedirects = true;
 
+  /** Shared by every snapshot: query params belong to the URL, not to any one route. */
+  private queryParams: Params;
+
   constructor(
     private injector: EnvironmentInjector,
     private configLoader: RouterConfigLoader,
@@ -83,6 +86,7 @@ export class Recognizer {
     private readonly abortSignal: AbortSignal,
   ) {
     this.applyRedirects = new ApplyRedirects(this.urlSerializer, this.urlTree);
+    this.queryParams = Object.freeze({...this.urlTree.queryParams});
   }
 
   private noMatchError(e: NoMatch): RuntimeError<RuntimeErrorCode.NO_MATCH> {
@@ -123,7 +127,7 @@ export class Recognizer {
     const rootSnapshot = new ActivatedRouteSnapshot(
       [],
       Object.freeze({}),
-      Object.freeze({...this.urlTree.queryParams}),
+      this.queryParams,
       this.urlTree.fragment,
       Object.freeze({}),
       PRIMARY_OUTLET,
@@ -143,7 +147,20 @@ export class Recognizer {
       return {children, rootSnapshot};
     } catch (e: any) {
       if (e instanceof AbsoluteRedirect) {
+        // Count at the actual root-restart boundary so redirects returned from functions are
+        // subject to the same limit as static redirects.
+        this.absoluteRedirectCount++;
+        if (this.absoluteRedirectCount > MAX_ALLOWED_REDIRECTS) {
+          if (ngDevMode) {
+            throw new RuntimeError(
+              RuntimeErrorCode.INFINITE_REDIRECT,
+              `Detected possible infinite redirect when redirecting from '${this.urlTree}' to '${e.urlTree}'.`,
+            );
+          }
+          this.allowRedirects = false;
+        }
         this.urlTree = e.urlTree;
+        this.queryParams = Object.freeze({...this.urlTree.queryParams});
         return this.match(e.urlTree.root);
       }
       if (e instanceof NoMatch) {
@@ -223,11 +240,6 @@ export class Recognizer {
     // multiple activated results for the same outlet. We should merge the children of
     // these results so the final return value is only one `TreeNode` per outlet.
     const mergedChildren = mergeEmptyPathMatches(children);
-    if (typeof ngDevMode === 'undefined' || ngDevMode) {
-      // This should really never happen - we are only taking the first match for each
-      // outlet and merge the empty path matches.
-      checkOutletNameUniqueness(mergedChildren);
-    }
     sortActivatedRouteSnapshots(mergedChildren);
     return mergedChildren;
   }
@@ -334,22 +346,6 @@ export class Recognizer {
       match(segmentGroup, route, segments);
     if (!matched) throw new NoMatch(segmentGroup);
 
-    // TODO(atscott): Move all of this under an if(ngDevMode) as a breaking change and allow stack
-    // size exceeded in production
-    if (typeof route.redirectTo === 'string' && route.redirectTo[0] === '/') {
-      this.absoluteRedirectCount++;
-      if (this.absoluteRedirectCount > MAX_ALLOWED_REDIRECTS) {
-        if (ngDevMode) {
-          throw new RuntimeError(
-            RuntimeErrorCode.INFINITE_REDIRECT,
-            `Detected possible infinite redirect when redirecting from '${this.urlTree}' to '${route.redirectTo}'.\n` +
-              `This is currently a dev mode only error but will become a` +
-              ` call stack size exceeded error in production in a future major version.`,
-          );
-        }
-        this.allowRedirects = false;
-      }
-    }
     const currentSnapshot = this.createSnapshot(injector, route, segments, parameters, parentRoute);
     if (this.abortSignal.aborted) {
       throw new Error(this.abortSignal.reason);
@@ -384,7 +380,7 @@ export class Recognizer {
     const snapshot = new ActivatedRouteSnapshot(
       segments,
       parameters,
-      Object.freeze({...this.urlTree.queryParams}),
+      this.queryParams,
       this.urlTree.fragment,
       getData(route),
       getOutlet(route),
@@ -394,8 +390,8 @@ export class Recognizer {
       injector,
     );
     const inherited = getInherited(snapshot, parentRoute, this.paramsInheritanceStrategy);
-    snapshot.params = Object.freeze(inherited.params);
-    snapshot.data = Object.freeze(inherited.data);
+    snapshot.params = inherited.params;
+    snapshot.data = inherited.data;
     return snapshot;
   }
 
@@ -580,11 +576,13 @@ function mergeEmptyPathMatches(
     const mergedChildren = mergeEmptyPathMatches(mergedNode.children);
     result.push(new TreeNode(mergedNode.value, mergedChildren));
   }
-  return result.filter((n) => !mergedNodes.has(n));
+  const merged = result.filter((n) => !mergedNodes.has(n));
+  checkOutletNameUniqueness(merged);
+  return merged;
 }
 
 function checkOutletNameUniqueness(nodes: TreeNode<ActivatedRouteSnapshot>[]): void {
-  const names: {[k: string]: ActivatedRouteSnapshot} = {};
+  const names: {[k: string]: ActivatedRouteSnapshot} = Object.create(null);
   nodes.forEach((n) => {
     const routeWithSameOutletName = names[n.value.outlet];
     if (routeWithSameOutletName) {
