@@ -34,13 +34,14 @@ import {
   provideZoneChangeDetection,
   QueryList,
   ɵRuntimeError as RuntimeError,
+  signal,
   Type,
   ViewChild,
   ViewChildren,
   ɵDEFER_BLOCK_DEPENDENCY_INTERCEPTOR,
 } from '../../src/core';
-import {IDLE_SERVICE, IdleService, provideIdleServiceWith} from '../../src/defer/idle_service';
 import {IdleScheduler} from '../../src/defer/idle_scheduler';
+import {IDLE_SERVICE, IdleService, provideIdleServiceWith} from '../../src/defer/idle_service';
 import {TimerScheduler} from '../../src/defer/timer_scheduler';
 import {formatRuntimeErrorCode, RuntimeErrorCode} from '../../src/errors';
 import {provideNgReflectAttributes} from '../../src/ng_reflect';
@@ -196,7 +197,6 @@ function createFixture(template: string) {
   }
 
   @Component({
-    selector: 'simple-app',
     imports: [NestedCmp],
     template,
 
@@ -610,7 +610,6 @@ describe('@defer', () => {
 
     it('should produce a message into a console about eagerly loaded deps', async () => {
       @Component({
-        selector: 'simple-app',
         template: `
           @defer (when true) {
             Defer block #1
@@ -650,7 +649,6 @@ describe('@defer', () => {
 
     it('should not produce a message about eagerly loaded deps if no defer blocks are present', () => {
       @Component({
-        selector: 'simple-app',
         template: `No defer blocks`,
 
         changeDetection: ChangeDetectionStrategy.Eager,
@@ -828,6 +826,83 @@ describe('@defer', () => {
         globalThis.requestIdleCallback = nativeRequestIdleCallback;
         globalThis.cancelIdleCallback = nativeCancelIdleCallback;
       }
+    });
+
+    it('should cancel an `on idle` request registered while another idle callback was running', () => {
+      @Component({
+        selector: 'cmp-a',
+        template: 'A',
+        changeDetection: ChangeDetectionStrategy.Eager,
+      })
+      class CmpA {}
+
+      @Component({
+        selector: 'cmp-b',
+        template: 'B',
+        changeDetection: ChangeDetectionStrategy.Eager,
+      })
+      class CmpB {}
+
+      @Component({
+        selector: 'root-app',
+        imports: [CmpA, CmpB],
+        template: `
+          @defer (on idle) {
+            <cmp-a />
+          }
+          @if (showB()) {
+            @defer (on idle) {
+              <cmp-b />
+            }
+          }
+        `,
+        changeDetection: ChangeDetectionStrategy.Eager,
+      })
+      class RootCmp {
+        showB = signal(false);
+      }
+
+      @Injectable({providedIn: 'root'})
+      class CustomIdleService implements IdleService {
+        private nextId = 0;
+        readonly pending = new Map<number, (deadline?: IdleDeadline) => void>();
+
+        requestOnIdle(callback: (deadline?: IdleDeadline) => void): number {
+          const id = ++this.nextId;
+          this.pending.set(id, callback);
+          return id;
+        }
+
+        cancelOnIdle(id: number): void {
+          this.pending.delete(id);
+        }
+
+        trigger(): void {
+          const callbacks = [...this.pending.values()];
+          this.pending.clear();
+          callbacks.forEach((callback) => callback());
+        }
+      }
+
+      TestBed.configureTestingModule({
+        providers: [...COMMON_PROVIDERS, provideIdleServiceWith(CustomIdleService)],
+      });
+
+      const fixture = TestBed.createComponent(RootCmp);
+      // Attach the view to `ApplicationRef` so that the tick inside the idle callback refreshes it.
+      fixture.autoDetectChanges();
+
+      const idleService = TestBed.inject(CustomIdleService);
+      expect(idleService.pending.size).toBe(1);
+
+      // Make the `@if` pending so that the tick inside the idle callback renders it.
+      // Its block then requests a new idle callback while the first one is still running.
+      fixture.componentInstance.showB.set(true);
+      idleService.trigger();
+      expect(idleService.pending.size).toBe(1);
+
+      fixture.destroy();
+      expect(idleService.pending.size).toBe(0);
     });
   });
 
@@ -1185,7 +1260,6 @@ describe('@defer', () => {
       class NestedCmp {}
 
       @Component({
-        selector: 'simple-app',
         imports: [NestedCmp],
         template: `
           @defer (when isVisible) {
@@ -1687,7 +1761,6 @@ describe('@defer', () => {
       class CmpA {}
 
       @Component({
-        selector: 'root-app',
         imports: [CmpA],
         template: `
           @defer (on immediate) {
@@ -2850,7 +2923,6 @@ describe('@defer', () => {
 
     it('should clear idle handlers when defer block is triggered', async () => {
       @Component({
-        selector: 'root-app',
         template: `
           @defer (when isVisible; on idle; prefetch on idle) {
             Hello world!
@@ -3407,7 +3479,6 @@ describe('@defer', () => {
 
     it('should prefetch resources on interaction', async () => {
       @Component({
-        selector: 'root-app',
         template: `
           @defer (when isLoaded; prefetch on interaction(trigger)) {
             Main content
@@ -3454,7 +3525,6 @@ describe('@defer', () => {
 
     it('should prefetch resources on interaction with an implicit trigger', async () => {
       @Component({
-        selector: 'root-app',
         template: `
           @defer (when isLoaded; prefetch on interaction) {
             Main content
@@ -3719,7 +3789,6 @@ describe('@defer', () => {
       }
 
       @Component({
-        selector: 'root-app',
         template: `
           @defer (when isLoaded; prefetch on hover(trigger)) {
             Main content
@@ -3772,7 +3841,6 @@ describe('@defer', () => {
       }
 
       @Component({
-        selector: 'root-app',
         template: `
           @defer (when isLoaded; prefetch on hover) {
             Main content
@@ -4053,7 +4121,6 @@ describe('@defer', () => {
       const clearSpy = spyOn(globalThis, 'clearTimeout');
 
       @Component({
-        selector: 'root-app',
         template: `
           @defer (when isVisible; on timer(200ms); prefetch on timer(100ms)) {
             Hello world!
@@ -4444,7 +4511,6 @@ describe('@defer', () => {
 
     it('should prefetch resources when the trigger comes into the viewport', async () => {
       @Component({
-        selector: 'root-app',
         template: `
           @defer (when isLoaded; prefetch on viewport(trigger)) {
             Main content
@@ -4492,7 +4558,6 @@ describe('@defer', () => {
 
     it('should prefetch resources when an implicit trigger comes into the viewport', async () => {
       @Component({
-        selector: 'root-app',
         template: `
           @defer (when isLoaded; prefetch on viewport) {
             Main content
@@ -4920,7 +4985,6 @@ describe('@defer', () => {
       }
 
       @Component({
-        selector: 'app-root',
         template: `
           <parent-cmp>
             @defer (when isVisible) {
@@ -5003,7 +5067,6 @@ describe('@defer', () => {
         class Dialog {}
 
         @Component({
-          selector: 'app-root',
           providers: [{provide: TokenA, useValue: 'TokenA from RootCmp'}],
           template: ` <div #container></div> `,
 
@@ -5104,7 +5167,6 @@ describe('@defer', () => {
       class ChartCollectionComponent {}
 
       @Component({
-        selector: 'app-root',
         template: `
           @for (item of items; track $index) {
             @defer (when isVisible) {
@@ -5720,5 +5782,62 @@ describe('IdleScheduler', () => {
     expect(cbA).toHaveBeenCalledTimes(1);
     expect(cbB).toHaveBeenCalledTimes(1);
     expect(ricCount).toBe(1);
+  });
+
+  it('should cancel a bucket that was created while another bucket with the same key was draining', () => {
+    let capturedCbs: Array<(deadline: any) => void> = [];
+    let ricCount = 0;
+
+    customIdleService.requestOnIdleSpy.and.callFake((cb: any) => {
+      ricCount++;
+      capturedCbs.push(cb);
+      return 100 + ricCount;
+    });
+    const cancelOnIdleSpy = spyOn(customIdleService, 'cancelOnIdle');
+
+    const cbB = jasmine.createSpy('cbB');
+    const cbA = jasmine.createSpy('cbA').and.callFake(() => {
+      // Emulates a trigger cleanup emptying the current bucket, followed by
+      // a new idle-triggered block being registered within the same drain.
+      scheduler.remove(cbA);
+      scheduler.add(cbB);
+    });
+
+    scheduler.add(cbA);
+    capturedCbs[0]({didTimeout: false, timeRemaining: () => 10});
+
+    expect(cbA).toHaveBeenCalledTimes(1);
+    expect(cbB).toHaveBeenCalledTimes(0);
+    expect(ricCount).toBe(2);
+
+    cancelOnIdleSpy.calls.reset();
+    scheduler.remove(cbB);
+    expect(cancelOnIdleSpy).toHaveBeenCalledOnceWith(102);
+  });
+
+  it('should cancel a bucket created during another bucket drain on destroy', () => {
+    let capturedCbs: Array<(deadline: any) => void> = [];
+    let ricCount = 0;
+
+    customIdleService.requestOnIdleSpy.and.callFake((cb: any) => {
+      ricCount++;
+      capturedCbs.push(cb);
+      return 100 + ricCount;
+    });
+    const cancelOnIdleSpy = spyOn(customIdleService, 'cancelOnIdle');
+
+    const cbB = jasmine.createSpy('cbB');
+    const cbA = jasmine.createSpy('cbA').and.callFake(() => {
+      scheduler.remove(cbA);
+      scheduler.add(cbB);
+    });
+
+    scheduler.add(cbA);
+    capturedCbs[0]({didTimeout: false, timeRemaining: () => 10});
+    expect(ricCount).toBe(2);
+
+    cancelOnIdleSpy.calls.reset();
+    scheduler.ngOnDestroy();
+    expect(cancelOnIdleSpy).toHaveBeenCalledOnceWith(102);
   });
 });
