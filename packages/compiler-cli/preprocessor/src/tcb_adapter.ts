@@ -33,8 +33,6 @@ import type {TcbTargetInput, NgpTypeCheckingConfig} from './tcb.js';
 import * as nga from './types.js';
 import {createForeignComponentMatcher, createSpan, isStaticSourceNode} from './compiler-utils.js';
 
-// PropertyMappingImpl is removed as we now use ClassPropertyMapping directly.
-
 export function createInputPropertyMapping(
   metadata: nga.InputMetadata[] | null | undefined,
   content?: string,
@@ -568,9 +566,7 @@ function declarationToMetadata(
         .filter((f) => f.kind === 'input' && f.input && !f.input.propertySpan)
         .map((f) => f.input!.name),
     ),
-    // TODO(parity): populate `publicMethods`; signal-forms type-checking uses it to detect
-    // ControlValueAccessor directives (`writeValue`, `registerOnChange`, `registerOnTouched`).
-    publicMethods: new Set(),
+    publicMethods: new Set(decl.publicMethods ?? []),
     ngContentSelectors: decl.ngContentSelectors || null,
     animationTriggerNames: decl.animationTriggerNames || null,
   };

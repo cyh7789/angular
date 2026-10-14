@@ -59,6 +59,8 @@ export interface AnalysisResult {
   typeOnlyExports: Array<string>;
   diagnostics: Array<NgDiagnostic>;
   signalDebugNames: Array<SignalDebugNameMetadata>;
+  r3SymbolsSpecifier?: string;
+  topLevelValueBindings?: Array<string>;
 }
 
 export interface AnalyzerOptions {
@@ -76,6 +78,7 @@ export interface AnalyzerOptions {
   workspaceName?: string;
   /** Root directories used by `PrefixImportStrategy` to strip prefixes. */
   rootDirs?: Array<string>;
+  enableHmr?: boolean;
 }
 
 export interface AngularFieldMetadata {
@@ -96,6 +99,7 @@ export interface ClassMetadata {
   constructorParams?: Array<ConstructorParamMetadata>;
   memberDecorators?: Array<DecoratedMemberMetadata>;
   laterDeclarationReferences: Array<SpanMetadata>;
+  topLevelReferences?: Array<TopLevelReferenceMetadata>;
   injectable?: InjectableMetadata;
   service?: ServiceMetadata;
   component?: ComponentMetadata;
@@ -137,6 +141,7 @@ export interface ClassMetadata {
   hasNgTemplateContextGuard: boolean;
   ngTemplateGuards: Array<TemplateGuardMetadata>;
   hasNgFieldDirective: boolean;
+  publicMethods: Array<string>;
   superClass?: DeclarationTuple;
   usesInheritance: boolean;
   usesOnChanges: boolean;
@@ -214,6 +219,7 @@ export interface ComponentMetadata {
   encapsulation?: number;
   /** `changeDetection` expression as written in the decorator, matching ngtsc's local compilation behavior. `None` when absent. */
   changeDetection?: string;
+  changeDetectionSpan?: SpanMetadata;
   preserveWhitespaces?: boolean;
   animationsSpan?: SpanMetadata;
   animationTriggerNames?: LegacyAnimationTriggerNames;
@@ -250,6 +256,37 @@ export interface ConstructorParamMetadata {
   decorators: Array<DecoratorMetadata>;
 }
 
+/** Which primitive a `ConstEnumMemberMetadata.value` encodes. */
+export enum ConstEnumMemberKind {
+  String = 'string',
+  Number = 'number',
+  Boolean = 'boolean',
+  Null = 'null',
+  Undefined = 'undefined',
+}
+
+/**
+ * A const enum member the HMR update callback receives as an object-literal entry (const
+ * enums are inlined by TypeScript and have no runtime object to pass by reference).
+ */
+export interface ConstEnumMemberMetadata {
+  key: string;
+  kind: ConstEnumMemberKind;
+  value: string;
+}
+
+/**
+ * A read of a root-scope value binding (import, class, function, enum, variable) inside this
+ * class's Angular decorator metadata — the identifiers ngtsc's `PotentialTopLevelReadsVisitor`
+ * finds in the `WrappedNodeExpr`s of a compiled component.
+ */
+export interface TopLevelReferenceMetadata {
+  name: string;
+  span: SpanMetadata;
+  isConstEnum: boolean;
+  constEnumMembers?: Array<ConstEnumMemberMetadata>;
+}
+
 export interface DeclarationMetadata {
   name: string;
   ref: ReferenceMetadata;
@@ -272,6 +309,8 @@ export interface DeclarationMetadata {
   ngTemplateGuards: Array<TemplateGuardMetadata>;
   animationTriggerNames?: LegacyAnimationTriggerNames;
   hasNgFieldDirective: boolean;
+  /** Public instance method names across the inheritance chain (`publicMethods` in ngtsc). */
+  publicMethods: Array<string>;
   isForwardRef: boolean;
   isStructural: boolean;
   cycleProne?: boolean;
@@ -456,6 +495,8 @@ export interface HostMetadataEntry {
   value?: string;
   /** Source text of a value that is not statically evaluable, for verbatim re-emission. */
   expression?: string;
+  /** Span of `expression` in the declaring file, for HMR's local-dependency capture. */
+  expressionSpan?: SpanMetadata;
 }
 
 export interface HostPropertyMetadata {
@@ -507,11 +548,6 @@ export interface ImportDeclarationMetadata {
   specifier: string;
   /** Introduced bindings (empty for bare side-effect imports). */
   bindings: Array<ImportBindingMetadata>;
-}
-
-export interface ImportViaMetadata {
-  moduleSpecifier: string;
-  symbol?: string;
 }
 
 export interface InjectableMetadata {

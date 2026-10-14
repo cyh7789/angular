@@ -7,6 +7,10 @@
  */
 
 import {outputAst as o, AbstractEmitterVisitor, EmitterVisitorContext} from '@angular/compiler';
+import {validateAndRewriteCoreSymbol} from '@angular/compiler-cli/private/hybrid_analysis';
+import type {SpanMetadata} from './types.js';
+
+const CORE_MODULE = '@angular/core';
 
 const NUMERIC_OPERATORS = new Set([
   o.BinaryOperator.Bigger,
@@ -66,7 +70,10 @@ function binaryNeedsTsIgnore(expression: o.BinaryOperatorExpr): boolean {
 }
 
 export class RawSource {
-  constructor(public readonly source: string) {}
+  constructor(
+    public readonly source: string,
+    public readonly spans: readonly SpanMetadata[] = [],
+  ) {}
 }
 
 export class ExpressionPrinter {
@@ -84,9 +91,12 @@ export class ExpressionPrinter {
   private readonly exprVisitor: EmitterVisitor;
   private readonly typeVisitor: EmitterVisitor;
 
-  constructor(filePath: string) {
+  constructor(
+    filePath: string,
+    private readonly r3SymbolsSpecifier: string | null = null,
+  ) {
     this.emitTypes = filePath.endsWith('.ts') || filePath.endsWith('.mts');
-    this.moduleToNamespace.set('@angular/core', 'i0');
+    this.moduleToNamespace.set(CORE_MODULE, 'i0');
     this.generatedNamespaceCount = 1;
     this.exprVisitor = new EmitterVisitor(this);
     this.typeVisitor = new EmitterVisitor(this, true);
@@ -122,9 +132,29 @@ export class ExpressionPrinter {
     return namespace;
   }
 
+  rewriteSymbol(symbolName: string, moduleName: string): string {
+    if (this.r3SymbolsSpecifier === null || moduleName !== CORE_MODULE) {
+      return symbolName;
+    }
+    return validateAndRewriteCoreSymbol(symbolName);
+  }
+
+  private rewriteSpecifier(moduleName: string): string {
+    if (this.r3SymbolsSpecifier === null || moduleName !== CORE_MODULE) {
+      return moduleName;
+    }
+    return this.r3SymbolsSpecifier;
+  }
+
   addNamespaceImport(moduleSpecifier: string, namespaceAlias: string): void {
-    this.moduleToNamespace.set(moduleSpecifier, namespaceAlias);
-    this.existingNamespaces.add(moduleSpecifier);
+    // A pre-existing namespace import of `r3_symbols.ts` is this file's `@angular/core` import,
+    // already rewritten; register it under the module name requests arrive with.
+    const moduleName =
+      this.r3SymbolsSpecifier !== null && moduleSpecifier === this.r3SymbolsSpecifier
+        ? CORE_MODULE
+        : moduleSpecifier;
+    this.moduleToNamespace.set(moduleName, namespaceAlias);
+    this.existingNamespaces.add(moduleName);
   }
 
   addSideEffectImport(moduleSpecifier: string): void {
@@ -141,7 +171,8 @@ export class ExpressionPrinter {
       }
 
       if (!this.existingNamespaces.has(moduleName)) {
-        statements.push(`// @ts-ignore\nimport * as ${namespace} from '${moduleName}';`);
+        const specifier = this.rewriteSpecifier(moduleName);
+        statements.push(`// @ts-ignore\nimport * as ${namespace} from '${specifier}';`);
       }
     }
 
@@ -152,7 +183,7 @@ export class ExpressionPrinter {
         continue;
       }
 
-      statements.push(`// @ts-ignore\nimport '${moduleName}';`);
+      statements.push(`// @ts-ignore\nimport '${this.rewriteSpecifier(moduleName)}';`);
     }
 
     return statements.length > 0 ? statements.join('\n') : null;
@@ -164,7 +195,7 @@ export class ExpressionPrinter {
     this.sideEffectImports.clear();
     this.usedNamespaces.clear();
     this.generatedNamespaceCount = 1;
-    this.moduleToNamespace.set('@angular/core', 'i0');
+    this.moduleToNamespace.set(CORE_MODULE, 'i0');
   }
 }
 
@@ -206,7 +237,14 @@ class EmitterVisitor extends AbstractEmitterVisitor {
 
     if (moduleName) {
       const namespace = this.printer.getOrCreateNamespace(moduleName);
-      ctx.print(ast, `${namespace}.${symbolName}`);
+      // `name` is `null` when the module itself is referenced (e.g. the namespaces an HMR
+      // initializer captures).
+      ctx.print(
+        ast,
+        symbolName == null
+          ? namespace
+          : `${namespace}.${this.printer.rewriteSymbol(symbolName, moduleName)}`,
+      );
     } else {
       ctx.print(ast, symbolName || '');
     }
@@ -219,6 +257,34 @@ class EmitterVisitor extends AbstractEmitterVisitor {
       });
       ctx.print(ast, '>');
     }
+  }
+
+  override visitReadPropExpr(ast: o.ReadPropExpr, ctx: EmitterVisitorContext): void {
+    // Add a `ts-ignore` since `import.meta` is only valid when es2020 is enabled.
+    if (
+      this.printTypes &&
+      ast.name === 'meta' &&
+      ast.receiver instanceof o.ReadVarExpr &&
+      ast.receiver.name === 'import'
+    ) {
+      ctx.addUniqueSingleLineComment(' @ts-ignore');
+    }
+    super.visitReadPropExpr(ast, ctx);
+  }
+
+  override visitDynamicImportExpr(ast: o.DynamicImportExpr, ctx: EmitterVisitorContext): void {
+    if (ast.urlComment == null) {
+      super.visitDynamicImportExpr(ast, ctx);
+      return;
+    }
+
+    this.printLeadingComments(ast, ctx);
+    ctx.print(ast, `import(/* ${ast.urlComment} */ `);
+
+    const url = typeof ast.url === 'string' ? o.literal(ast.url) : ast.url;
+    url.visitExpression(this, ctx);
+
+    ctx.print(ast, `)`);
   }
 
   override visitLocalizedString(ast: o.LocalizedString, ctx: EmitterVisitorContext): void {

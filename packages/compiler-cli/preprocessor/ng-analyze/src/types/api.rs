@@ -63,6 +63,9 @@ pub struct AnalysisResult {
     pub type_only_exports: Vec<String>,
     pub diagnostics: Vec<NgDiagnostic>,
     pub signal_debug_names: Vec<super::metadata::SignalDebugNameMetadata>,
+    pub r3_symbols_specifier: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub top_level_value_bindings: Option<Vec<String>>,
 }
 
 #[cfg_attr(feature = "napi", napi(object))]
@@ -81,6 +84,10 @@ pub struct AnalyzerOptions {
     pub workspace_name: Option<String>,
     /// Root directories used by `PrefixImportStrategy` to strip prefixes.
     pub root_dirs: Option<Vec<String>>,
+    /// Collect the HMR-only wire data (`ClassMetadata.top_level_references`,
+    /// `AnalysisResult.top_level_value_bindings`). Falls back to the tsconfig's
+    /// `angularCompilerOptions._enableHmr` when unset.
+    pub enable_hmr: Option<bool>,
 }
 
 #[cfg_attr(feature = "napi", napi(object))]
@@ -135,6 +142,7 @@ pub struct DeclarationMetadata {
     pub ng_template_guards: Vec<TemplateGuardMetadata>,
     pub animation_trigger_names: Option<LegacyAnimationTriggerNames>,
     pub has_ng_field_directive: bool,
+    pub public_methods: Vec<String>,
     pub is_forward_ref: bool,
     pub is_structural: bool,
     pub cycle_prone: Option<bool>,
@@ -215,6 +223,7 @@ impl DeclarationMetadata {
             ng_template_guards: d.ng_template_guards.clone(),
             animation_trigger_names: d.animation_trigger_names.clone(),
             has_ng_field_directive: d.has_ng_field_directive,
+            public_methods: d.public_methods.clone(),
             is_forward_ref: d.is_forward_ref,
             is_structural: d.is_structural,
             cycle_prone: d.cycle_prone,

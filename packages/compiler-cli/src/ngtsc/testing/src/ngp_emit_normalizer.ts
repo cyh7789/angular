@@ -36,6 +36,19 @@ function canonicalizeStringQuotes(code: string, ellipsisToken = '\u2026'): strin
   return code.split(ellipsisToken).map(canonicalizeSegmentQuotes).join(ellipsisToken);
 }
 
+function transformOutsideStringLikeTokens(
+  code: string,
+  transform: (segment: string) => string,
+): string {
+  let out = '';
+  let last = 0;
+  for (const match of code.matchAll(STRING_LIKE_TOKEN)) {
+    out += transform(code.slice(last, match.index)) + match[0];
+    last = match.index + match[0].length;
+  }
+  return out + transform(code.slice(last));
+}
+
 /**
  * Strips redundant clarifying parentheses that NGP's `ExpressionPrinter` emits around binary,
  * conditional, or assignment expressions where TypeScript's AST printer omits them based on
@@ -186,6 +199,10 @@ export function normalizeNgpEmitForComparison(code: string, ellipsisToken = '\u2
         /static\s+(ɵ(?:cmp|dir|pipe|mod|inj|prov|fac))\s*=\s*(?!\/\*\s*@__PURE__\s*\*\/)(i0\.ɵɵdefine|\(\(\)\s*=>)/g,
         'static $1 = /*@__PURE__*/ $2',
       )
+      // Under `annotateForClosureCompiler` NGP puts `/** @pureOrBreakMyCode */` on the line after
+      // `=` (the only placement `tsc` carries through to the downleveled assignment); ngtsc emits
+      // it on the same line.
+      .replace(/=\s*\n\s*(\/\*\* @pureOrBreakMyCode \*\/)/g, '= $1')
       .replace(
         /\(\(\(typeof\s+(ngDevMode|ngJitMode)\s*===\s*(['"])undefined\2\)\s*\|\|\s*\1\)/g,
         '((typeof $1 === $2undefined$2 || $1)',
@@ -207,13 +224,15 @@ export function normalizeNgpEmitForComparison(code: string, ellipsisToken = '\u2
  * `NgtscTestEnvironment.getContents()`.
  */
 export function normalizeNgpOutputFile(content: string): string {
-  return content
+  const normalized = content
     .replace(/^[ \t]*\/\/[ \t]*@ts-ignore[^\n]*\r?\n/gm, '')
     .replace(/\/\*\s*@ts-ignore\s*\*\/\s*/g, '')
     .replace(
-      /(\.(?:ɵcmp|ɵdir|ɵpipe|ɵmod|ɵinj|ɵprov)\s*=\s*)(?!\/\*\s*@__PURE__\s*\*\/)(i0\.ɵɵdefine)/g,
+      /(\.(?:ɵcmp|ɵdir|ɵpipe|ɵmod|ɵinj|ɵprov)\s*=\s*)(?!\/\*\s*@__PURE__\s*\*\/)([A-Za-z0-9_$ɵ]+\.ɵɵdefine)/g,
       '$1/*@__PURE__*/ $2',
     )
+    // See `normalizeNgpEmitForComparison`: the Closure pure marker lands on the line after `=`.
+    .replace(/=\s*\n\s*(\/\*\* @pureOrBreakMyCode \*\/)/g, '= $1')
     .replace(
       /(\.ɵfac\s*=\s*function\s+[A-Za-z0-9_$]+\(__ngFactoryType__\)\s*\{)\s*\n\s*(return\s+new\s+\(__ngFactoryType__\s*\|\|\s*[A-Za-z0-9_$]+\)\([^;\n]*\);)\s*\n\s*\};/g,
       '$1 $2 };',
@@ -226,5 +245,7 @@ export function normalizeNgpOutputFile(content: string): string {
       /\(\(typeof\s+(ngDevMode|ngJitMode)\s*===\s*(['"])undefined\2\s*\|\|\s*\1\)\s*&&\s*([^;\n]+)\);/g,
       '(typeof $1 === $2undefined$2 || $1) && $3;',
     )
+    .replace(/\((m\.default && [A-Za-z0-9_$]+\.ɵɵreplaceMetadata\([^;\n]*\))\)/g, '$1')
     .replace(/'([^'\\\n]*)'/g, '"$1"');
+  return transformOutsideStringLikeTokens(normalized, (code) => code.replace(/,(?=[^\s,])/g, ', '));
 }

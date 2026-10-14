@@ -171,6 +171,7 @@ fn run_async_compiler_test<Fs: crate::ResourceResolverFs + Clone + 'static>(
 
             let path_lookup = |id| engine.lookup_path(id);
             let declaring_exports = engine.declaring_export_names_blocking(&resolved);
+            let r3_symbols_path = engine.r3_symbols_file();
             let cx = crate::analyzer::WireContext {
                 mode: crate::analyzer::WireMode::Semantic,
                 source_text: &source_text,
@@ -178,6 +179,7 @@ fn run_async_compiler_test<Fs: crate::ResourceResolverFs + Clone + 'static>(
                 reference_strategy: &*engine.reference_strategy,
                 path_lookup: Some(&path_lookup),
                 declaring_exports: &declaring_exports,
+                r3_symbols_path: r3_symbols_path.as_deref(),
             };
 
             let _ = final_sender.send(
@@ -1173,7 +1175,10 @@ fn test_isolated_type_tuple_resolves_local_const_of_imported_classes() {
         );
         // `Hidden` is unexported, so the reference cannot be emitted from here: syntactic form.
         assert_eq!(mixed.elements[1].kind, IsolatedTypeElementKind::Typeof);
-        assert!(mixed.elements[1].references.is_none(), "optimize={optimize}");
+        assert!(
+            mixed.elements[1].references.is_none(),
+            "optimize={optimize}"
+        );
         assert_eq!(span_text(&mixed.elements[1]), "HIDDEN");
     }
 }
@@ -1695,8 +1700,6 @@ fn test_ngmodule_dts_tuple_typeof_array_spread() {
         }
     }
 
-    let file_paths: Vec<&str> = results.iter().map(|res| res.file_path.as_str()).collect();
-    println!("results file_paths: {:?}", file_paths);
     let app_meta = results
         .iter()
         .find(|res| res.file_path == "/project/app.ts")
