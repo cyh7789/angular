@@ -49,7 +49,7 @@ import {
   type R3DeferPerBlockDependency,
   type R3DeferPerComponentDependency,
 } from '@angular/compiler';
-import MagicString from 'magic-string';
+import MagicString, {type SourceMap} from 'magic-string';
 import * as fsSync from 'node:fs';
 import * as path from 'path';
 import {
@@ -77,6 +77,7 @@ import {analyzeForeignComponentFeatures} from './foreign_component.js';
 import {extractHmrMetadata, getHmrUpdateDeclaration} from './hmr.js';
 import type {IAnalyzer} from './hybrid_compiler.js';
 import {ExpressionPrinter, RawSource} from './output_ast_printer.js';
+import {OutputSourceMapBuilder, type OutputSourceMapOptions} from './output_source_map.js';
 import {analyzeTemplateForSelectorless} from './selectorless.js';
 import {
   combineTcbContent,
@@ -142,9 +143,27 @@ const GENERATED_NAMESPACE_ALIAS = /^(ɵ?i\d+|ɵng)$/;
 
 export interface ProcessedFile {
   magicString: MagicString;
+  /**
+   * Generates the source map of `magicString.toString()`. Unlike `magicString.generateMap()`,
+   * it also maps the compiled definitions back to the template and class they came from.
+   *
+   * This maps the `.ng.ts` output to its inputs only; whatever compiles that output further
+   * (TypeScript, a bundler) has to chain its own map through this one to reach the original
+   * sources. TODO(ngp): `composeEmittedSourceMap` in `ngtsc/testing/src/ngp_test_driver.ts` does
+   * that for the test harness and should move here once a build integration needs it.
+   */
+  generateSourceMap(options?: OutputSourceMapOptions): SourceMap;
   tcb?: TcbResult | null;
   diagnostics?: nga.NgDiagnostic[];
   hmrUpdateModule?: string | null;
+}
+
+/** The result for a file with nothing to compile, whose output is its original text. */
+function unprocessedFile(s: MagicString): ProcessedFile {
+  return {
+    magicString: s,
+    generateSourceMap: (options = {}) => s.generateMap({hires: true, ...options}),
+  };
 }
 
 export function buildTcbTargets(
@@ -247,7 +266,7 @@ export function buildTcbTargets(
 
 function mapDeps(
   deps: nga.DependencyMetadata[],
-  content: string,
+  content: MagicString | string,
   guards: nga.SpanMetadata[] = [],
 ): R3DependencyMetadata[] {
   return deps.map((dep) => {
@@ -275,7 +294,7 @@ export async function processFile(
 ): Promise<ProcessedFile> {
   const result = metadata || (await rawCtx.analyzer.getMetadataForFile(filePath));
   if (!result) {
-    return {magicString: new MagicString(content)};
+    return unprocessedFile(new MagicString(content));
   }
   const fileAnalysis = getOrCreateFileAnalysis(rawCtx.fileCache, filePath);
   if (!fileAnalysis.parsedTemplates) {
@@ -331,12 +350,15 @@ export function processFileSync(
 
   const result = metadata || ctx.analyzer.getMetadataForFileSync(filePath);
   if (!result) {
-    return {magicString: s};
+    return unprocessedFile(s);
   }
   const {classes, importsEnd, imports: importDeclarations} = result;
 
   // Inside `@angular/core` itself, generated imports of `@angular/core` go to `r3_symbols.ts`.
   const printer = new ExpressionPrinter(filePath, result.r3SymbolsSpecifier ?? null);
+  // Compiled text goes through `out` rather than `s` directly, so its source mappings survive.
+  const out = new OutputSourceMapBuilder(s, printer, filePath, content);
+  const generateSourceMap = (options?: OutputSourceMapOptions) => out.generateMap(options);
 
   if (!ctx.emitDeclarationOnly) {
     insertSignalDebugNames(s, result.signalDebugNames, printer.emitTypes);
@@ -537,7 +559,7 @@ export function processFileSync(
         ctx.isClosureCompilerEnabled,
       );
 
-      s.appendLeft(span.end - 1, compiledFactory + compiledPipe);
+      out.appendLeft(span.end - 1, compiledFactory + compiledPipe);
     }
 
     if (component) {
@@ -743,14 +765,31 @@ export function processFileSync(
       // compilation mode (`CompilationMode.LOCAL`, see `ngtsc/core/src/compiler.ts:1328-1330`).
       const isLocalCompilation = !ctx.optimize || !!ctx.emitDeclarationOnly;
 
-      if (standalone) {
-        const isAlreadyImported = filteredDeclarations.some((d) => d.name === className);
+      // Whether any resolved import of a standalone component was wrapped in `forwardRef(...)`.
+      // Evaluated before self-deduplication and template usage filtering so it mirrors ngtsc's
+      // `standaloneImportMayBeForwardDeclared` (`analysis.resolvedImports.some(ref => ref.synthetic)`):
+      // https://github.com/angular/angular/blob/83622ee/packages/compiler-cli/src/ngtsc/annotations/component/src/handler.ts#L2040-L2041
+      const standaloneImportMayBeForwardDeclared =
+        standalone && (resolvedDeclarations ?? []).some((d) => !!d.isForwardRef);
 
-        if (!isAlreadyImported) {
-          filteredDeclarations.push(
-            metadataToDeclaration(component, classMeta, 'component', parsed.ngContentSelectors),
-          );
-        }
+      if (standalone) {
+        // Standalone components always have themselves at the head of their template scope:
+        // `StandaloneComponentScopeReader` seeds `dependencies` and `seen` with the component
+        // before walking `imports`, so an explicit self-import is deduplicated in favor of index 0.
+        // Check `d.ref.localAlias === className` so an aliased cross-file import whose exported
+        // class name happens to match `className` (e.g. `import {Foo as OtherFoo}`) is preserved.
+        // https://github.com/angular/angular/blob/83622ee/packages/compiler-cli/src/ngtsc/scope/src/standalone.ts#L45-L57
+        filteredDeclarations = filteredDeclarations.filter(
+          (d) =>
+            !(
+              d.name === className &&
+              d.ref.localAlias === className &&
+              d.ref.consumerImport == null
+            ),
+        );
+        filteredDeclarations.unshift(
+          metadataToDeclaration(component, classMeta, 'component', parsed.ngContentSelectors),
+        );
       }
 
       // Track declarations by object identity (MinimalDirectiveMeta -> DeclarationMetadata)
@@ -810,7 +849,12 @@ export function processFileSync(
       // scoped to their `@defer` block, just not deferrable (see `canDeferDeps`).
       if (ctx.enableHmr) {
         for (const decl of filteredDeclarations) {
-          if (decl.name === className && decl.declarationType === 'component') {
+          if (
+            decl.name === className &&
+            decl.ref.localAlias === className &&
+            decl.ref.consumerImport == null &&
+            decl.declarationType === 'component'
+          ) {
             continue;
           }
           if (decl.isExplicitlyDeferred) {
@@ -1240,14 +1284,23 @@ export function processFileSync(
 
       // Decide whether the `dependencies` list is emitted directly or wrapped in a closure,
       // mirroring the reference compiler's naming and conditions.
-      // https://github.com/angular/angular/blob/83622ee/packages/compiler-cli/src/ngtsc/annotations/component/src/handler.ts#L2040
-      // https://github.com/angular/angular/blob/83622ee/packages/compiler-cli/src/ngtsc/annotations/common/src/util.ts#L286
+      // https://github.com/angular/angular/blob/83622ee/packages/compiler-cli/src/ngtsc/annotations/component/src/handler.ts#L2040-L2063
+      // https://github.com/angular/angular/blob/83622ee/packages/compiler-cli/src/ngtsc/annotations/common/src/util.ts#L286-L297
       const isExpressionForwardReference = (d: nga.DeclarationMetadata): boolean => {
-        if (className && d.name === className) return false;
+        if (
+          className &&
+          d.name === className &&
+          d.ref.localAlias === className &&
+          d.ref.consumerImport == null
+        ) {
+          return false;
+        }
         return !!d.isForwardRef;
       };
 
-      const hasForwardRef = filteredDeclarations.some((d) => isExpressionForwardReference(d));
+      const hasForwardRef =
+        standaloneImportMayBeForwardDeclared ||
+        filteredDeclarations.some((d) => isExpressionForwardReference(d));
 
       // Whether the template uses any directive/component (pipes don't count). When there are
       // unresolved runtime imports, we conservatively assume true because those imports may
@@ -1311,7 +1364,7 @@ export function processFileSync(
           diagnostics: fileDiagnostics,
         }),
         lifecycle: {usesOnChanges: classMeta.usesOnChanges},
-        inputs: buildInputsMap(inputs, content),
+        inputs: buildInputsMap(inputs, content, (span) => sliceGuarded(s, span, guards)),
         outputs: buildOutputsMap(outputs),
         usesInheritance: classMeta.usesInheritance,
         controlCreate: null,
@@ -1350,8 +1403,8 @@ export function processFileSync(
         // and only under `enableTemplateSourceLocations`.
         // https://github.com/angular/angular/blob/e3ac727/packages/compiler-cli/src/ngtsc/annotations/component/src/handler.ts#L812-L822
         relativeTemplatePath: getProjectRelativePath(
-          component.templateUrl?.resolvedPath ?? filePath,
-          ctx.rootDir,
+          component.templateUrl?.resolvedPath || filePath,
+          ctx,
         ),
         enableTemplateSourceLocations: ctx.enableTemplateSourceLocations ?? false,
         foreignImports:
@@ -1386,7 +1439,7 @@ export function processFileSync(
         true,
         ctx.isClosureCompilerEnabled,
       );
-      s.appendLeft(span.end - 1, compiledFac + compiledCmp + classMeta.coercionMembers);
+      out.appendLeft(span.end - 1, compiledFac + compiledCmp + classMeta.coercionMembers);
 
       if (ctx.enableHmr) {
         hmrComponent = {
@@ -1435,7 +1488,7 @@ export function processFileSync(
           diagnostics: fileDiagnostics,
         }),
         lifecycle: {usesOnChanges: classMeta.usesOnChanges},
-        inputs: buildInputsMap(inputs, content),
+        inputs: buildInputsMap(inputs, content, (span) => sliceGuarded(s, span, guards)),
         outputs: buildOutputsMap(outputs),
         usesInheritance: classMeta.usesInheritance,
         controlCreate: null,
@@ -1471,7 +1524,7 @@ export function processFileSync(
         true,
         ctx.isClosureCompilerEnabled,
       );
-      s.appendLeft(span.end - 1, compiledFac + compiledDir + classMeta.coercionMembers);
+      out.appendLeft(span.end - 1, compiledFac + compiledDir + classMeta.coercionMembers);
     }
     if (ngModule) {
       if (!ctx.emitDeclarationOnly) {
@@ -1489,12 +1542,12 @@ export function processFileSync(
         ctx,
         classes,
         classMeta,
-        content,
+        s,
         filePath,
         fileDiagnostics,
       );
 
-      s.appendLeft(span.end - 1, compiledFac + compiledMod + compiledInj);
+      out.appendLeft(span.end - 1, compiledFac + compiledMod + compiledInj);
       // The NgModule side-effect statements (`ɵɵsetNgModuleScope`, `ɵɵregisterNgModuleType`)
       // must be emitted AFTER `ɵsetClassMetadata`. The reference compiler unshifts the class
       // metadata statement to the front of these statements before emission.
@@ -1532,7 +1585,7 @@ export function processFileSync(
       // 2. Generate ɵprov (InjectableDef)
       const parsedDeps =
         injectable.deps && (injectable.useClass || injectable.useFactory)
-          ? mapDeps(injectable.deps, content, guards)
+          ? mapDeps(injectable.deps, s, guards)
           : undefined;
 
       const injectableMeta: R3InjectableMetadata = {
@@ -1574,7 +1627,7 @@ export function processFileSync(
       );
 
       // Insert at classEnd - 1 (before the closing brace)
-      s.appendLeft(span.end - 1, compiledFactory + compiledProv);
+      out.appendLeft(span.end - 1, compiledFactory + compiledProv);
     }
 
     if (service) {
@@ -1617,7 +1670,7 @@ export function processFileSync(
         true,
         ctx.isClosureCompilerEnabled,
       );
-      s.appendLeft(span.end - 1, compiledFactory + compiledProv);
+      out.appendLeft(span.end - 1, compiledFactory + compiledProv);
     }
 
     let classMetadataStmt: o.Statement | null = null;
@@ -1632,9 +1685,9 @@ export function processFileSync(
       );
       const metadata = printSetClassMetadata(classMetadataStmt, printer, ctx.complianceMode);
       if (ctx.complianceMode) {
-        s.appendRight(span.end, '\n' + metadata);
+        out.appendRight(span.end, '\n' + metadata);
       } else {
-        s.appendLeft(span.end - 1, metadata);
+        out.appendLeft(span.end - 1, metadata);
       }
     }
 
@@ -1642,12 +1695,12 @@ export function processFileSync(
     if (component) {
       debugInfoStmt = buildSetClassDebugInfo(
         className,
-        getProjectRelativePath(filePath, ctx.rootDir),
+        getProjectRelativePath(filePath, ctx),
         content,
         classMeta.nameSpan?.start ?? span.start,
         ctx.forbidOrphanComponents ?? false,
       );
-      s.appendRight(span.end, '\n' + printer.printStatement(debugInfoStmt));
+      out.appendRight(span.end, '\n' + printer.printStatement(debugInfoStmt));
     }
 
     if (hmrComponent !== null) {
@@ -1672,7 +1725,7 @@ export function processFileSync(
       // `ɵsetClassDebugInfo`.
       // https://github.com/angular/angular/blob/e3ac727/packages/compiler-cli/src/ngtsc/annotations/common/src/util.ts#L427-L439
       if (hmrMeta !== null) {
-        s.appendRight(
+        out.appendRight(
           span.end,
           '\n' + printer.printStatement(compileHmrInitializer(hmrMeta).toStmt()),
         );
@@ -1694,19 +1747,19 @@ export function processFileSync(
                 nameOffset: classMeta.nameSpan?.start ?? span.start,
                 ctx,
               });
-        return {magicString: s, hmrUpdateModule};
+        return {magicString: s, generateSourceMap, hmrUpdateModule};
       }
     }
 
     // Emit NgModule side-effect statements after `ɵsetClassMetadata` to match the reference order.
     if (ngModuleStatements) {
-      s.appendRight(span.end, '\n' + ngModuleStatements + '\n');
+      out.appendRight(span.end, '\n' + ngModuleStatements + '\n');
     }
   }
 
   // The target was not a component (or has no HMR metadata); nothing to update.
   if (ctx.hmrUpdateTarget !== undefined) {
-    return {magicString: s, hmrUpdateModule: null};
+    return {magicString: s, generateSourceMap, hmrUpdateModule: null};
   }
 
   for (const local of eagerDependencyNames) {
@@ -1749,7 +1802,7 @@ export function processFileSync(
     .join('\n');
   if (topOfFileStatements) {
     const prefix = importsEnd === 0 || content[importsEnd - 1] === '\n' ? '' : '\n';
-    s.appendRight(importsEnd, prefix + topOfFileStatements + '\n');
+    out.appendRight(importsEnd, prefix + topOfFileStatements + '\n');
   }
 
   const tcbTargets =
@@ -1807,6 +1860,7 @@ export function processFileSync(
 
   return {
     magicString: s,
+    generateSourceMap,
     tcb: returnTcb,
     diagnostics: fileDiagnostics,
     hmrUpdateModule,
@@ -1856,37 +1910,50 @@ function inlineDecoratorResources(
 /** Mirrors `FORWARD_REFERENCE_GUARD` in `ng-analyze/src/analyzer/mod.rs`. */
 const FORWARD_REFERENCE_GUARD = '// @ts-ignore\n';
 
+interface SourceInsertion {
+  position: number;
+  text: string;
+}
+
+const signalDebugNameInsertionsBySource = new WeakMap<MagicString, SourceInsertion[]>();
+
 /**
  * Give each signal-creating call the analyzer found its implicit `debugName`.
  */
 function insertSignalDebugNames(
   s: MagicString,
-  insertions: nga.SignalDebugNameMetadata[],
+  insertions: nga.SignalDebugNameMetadata[] | undefined,
   emitTypes: boolean,
 ): void {
+  if (!insertions || insertions.length === 0) return;
   // Note: we diverge from ngtsc with the `as []` as opposed to adding a `@ts-ignore`.
+  const recorded: SourceInsertion[] = [];
   for (const insertion of insertions) {
     const debugName = `{ debugName: ${JSON.stringify(insertion.debugName)} }`;
     const separator = insertion.needsSeparator ? ', ' : '';
+    let text: string;
     if (insertion.intoOptions) {
-      s.appendLeft(
-        insertion.position,
-        `...(ngDevMode ? ${debugName} : /* istanbul ignore next */ {})${separator}`,
-      );
-      continue;
+      text = `...(ngDevMode ? ${debugName} : /* istanbul ignore next */ {})${separator}`;
+    } else {
+      const devArgs = insertion.prependUndefined ? `undefined, ${debugName}` : debugName;
+      const spread = `...(ngDevMode ? [${devArgs}] : /* istanbul ignore next */ [])`;
+      text = emitTypes ? `${separator}${spread} as []` : `${separator}/* @ts-ignore */ ${spread}`;
     }
-    const devArgs = insertion.prependUndefined ? `undefined, ${debugName}` : debugName;
-    const spread = `...(ngDevMode ? [${devArgs}] : /* istanbul ignore next */ [])`;
-    s.appendLeft(
-      insertion.position,
-      emitTypes ? `${separator}${spread} as []` : `${separator}/* @ts-ignore */ ${spread}`,
-    );
+    s.appendLeft(insertion.position, text);
+    recorded.push({position: insertion.position, text});
+  }
+  if (recorded.length > 0) {
+    signalDebugNameInsertionsBySource.set(s, recorded);
   }
 }
 
 /**
  * Slice `span` from the original source, with a `// @ts-ignore` line right before each identifier
- * in `guards` (`ClassMetadata.laterDeclarationReferences`) that falls inside it.
+ * in `guards` (`ClassMetadata.laterDeclarationReferences`) and any implicit signal `debugName`
+ * insertions that fall inside it (mirroring ngtsc, where `signalMetadataTransform` runs on the
+ * `SourceFile` after `ivyTransformFactory` has already re-emitted decorator expressions into
+ * `ɵcmp`/`ɵdir` and `ɵsetClassMetadata`:
+ * https://github.com/angular/angular/blob/83622ee/packages/compiler-cli/src/ngtsc/core/src/compiler.ts#L879-L880).
  */
 function sliceGuarded(
   s: MagicString | string,
@@ -1894,16 +1961,33 @@ function sliceGuarded(
   guards: nga.SpanMetadata[],
 ): string {
   const source = typeof s === 'string' ? s : s.original;
-  const inside = [
-    ...new Set(
-      guards.map((guard) => guard.start).filter((start) => start >= span.start && start < span.end),
-    ),
-  ].sort((a, b) => a - b);
+  const insertions: SourceInsertion[] = [];
+  if (typeof s !== 'string') {
+    const debugInsertions = signalDebugNameInsertionsBySource.get(s);
+    if (debugInsertions !== undefined) {
+      for (const ins of debugInsertions) {
+        if (ins.position >= span.start && ins.position < span.end) {
+          insertions.push(ins);
+        }
+      }
+    }
+  }
+  const seenGuards = new Set<number>();
+  for (const guard of guards) {
+    if (guard.start >= span.start && guard.start < span.end && !seenGuards.has(guard.start)) {
+      seenGuards.add(guard.start);
+      insertions.push({position: guard.start, text: FORWARD_REFERENCE_GUARD});
+    }
+  }
+  if (insertions.length === 0) {
+    return source.slice(span.start, span.end);
+  }
+  insertions.sort((a, b) => a.position - b.position);
   let result = '';
   let cursor = span.start;
-  for (const start of inside) {
-    result += source.slice(cursor, start) + FORWARD_REFERENCE_GUARD;
-    cursor = start;
+  for (const ins of insertions) {
+    result += source.slice(cursor, ins.position) + ins.text;
+    cursor = ins.position;
   }
   return result + source.slice(cursor, span.end);
 }
@@ -2223,12 +2307,20 @@ function createStaticBlock(statement: string): string {
 /**
  * https://github.com/angular/angular/blob/c1829f6/packages/compiler-cli/src/ngtsc/util/src/path.ts#L29-L48
  */
-function getProjectRelativePath(filePath: string, rootDir: string | undefined): string | null {
-  if (!rootDir) {
-    return null;
+function getProjectRelativePath(filePath: string, ctx: HybridCompilerContext): string | null {
+  const rootDirs =
+    ctx.rootDirs && ctx.rootDirs.length > 0 ? ctx.rootDirs : ctx.rootDir ? [ctx.rootDir] : [];
+  let shortest: string | null = null;
+  for (const rootDir of rootDirs) {
+    if (!rootDir) continue;
+    const rel = path.posix.relative(rootDir, filePath);
+    if (!rel.startsWith('..') && !path.posix.isAbsolute(rel)) {
+      if (shortest === null || rel.length < shortest.length) {
+        shortest = rel;
+      }
+    }
   }
-  const rel = path.posix.relative(rootDir, filePath);
-  return rel.startsWith('..') ? null : rel;
+  return shortest;
 }
 
 /**
@@ -2237,13 +2329,7 @@ function getProjectRelativePath(filePath: string, rootDir: string | undefined): 
  * `getProjectRelativePath(...) || getCanonicalFileName(...)`).
  */
 function getHmrFilePath(filePath: string, ctx: HybridCompilerContext): string {
-  for (const rootDir of ctx.rootDirs ?? [ctx.rootDir]) {
-    const relative = getProjectRelativePath(filePath, rootDir);
-    if (relative !== null) {
-      return relative;
-    }
-  }
-  return filePath;
+  return getProjectRelativePath(filePath, ctx) ?? filePath;
 }
 
 /** The `ɵsetClassDebugInfo(...)` statement for a component (not yet printed). */
@@ -2303,7 +2389,7 @@ function compileHmrUpdateModule(options: HmrUpdateModuleOptions): string | null 
       : null;
   const debugInfo = buildSetClassDebugInfo(
     className,
-    getProjectRelativePath(filePath, ctx.rootDir),
+    getProjectRelativePath(filePath, ctx),
     content,
     options.nameOffset,
     ctx.forbidOrphanComponents ?? false,
@@ -2402,12 +2488,13 @@ function compileNgModuleDef(
   ctx: HybridCompilerContext,
   classes: nga.ClassMetadata[] = [],
   classMeta?: nga.ClassMetadata,
-  content?: string,
+  content?: MagicString | string,
   filePath?: string,
   diagnostics?: nga.NgDiagnostic[],
 ): {compiledFac: string; compiledMod: string; compiledInj: string; statements: string} {
   const {optimize, isClosureCompilerEnabled, emitDeclarationOnly} = ctx;
   const {declarations, imports, injectorImports, exports, bootstrap} = ngModule;
+  const sourceText = typeof content === 'string' ? content : content?.original;
 
   const mapToVarArr = (names: nga.ReferenceMetadata[] | undefined) =>
     names ? o.literalArr(names.map((d) => refToExpression(d))) : null;
@@ -2452,17 +2539,19 @@ function compileNgModuleDef(
           if (el.references && el.references.length > 0) {
             return new o.TypeofExpr(refToExpression(el.references[0]));
           }
-          if (el.span && content !== undefined) {
+          if (el.span && sourceText !== undefined) {
             return new o.TypeofExpr(
-              new o.WrappedNodeExpr(new RawSource(content.substring(el.span.start, el.span.end))),
+              new o.WrappedNodeExpr(
+                new RawSource(sourceText.substring(el.span.start, el.span.end)),
+              ),
             );
           }
           return new o.WrappedNodeExpr(new RawSource('never'));
         }
         case 'callReturnType': {
           const calleeText =
-            el.span && content !== undefined
-              ? content.substring(el.span.start, el.span.end)
+            el.span && sourceText !== undefined
+              ? sourceText.substring(el.span.start, el.span.end)
               : 'never';
           return new o.WrappedNodeExpr(new RawSource(`ReturnType<typeof ${calleeText}>`));
         }
@@ -2747,7 +2836,7 @@ function compileNgModuleDef(
  */
 function buildInjectorImports(
   ngModule: nga.NgModuleMetadata,
-  content?: string,
+  content?: MagicString | string,
   guards: nga.SpanMetadata[] = [],
 ): o.Expression[] {
   const {imports, injectorImports, exports} = ngModule;
@@ -3101,5 +3190,11 @@ function parseComponentTemplate(
   if (component.templateUrl == null && contentSpan != null) {
     return parseDirectInlineTemplate(content, filePath, contentSpan, parseOptions);
   }
-  return parseTemplate(component.template || '', filePath, parseOptions);
+  // The URL identifies the file the spans are offsets into, which for an external template is
+  // the template file itself (as in ngtsc's `extractTemplate`).
+  return parseTemplate(
+    component.template || '',
+    component.templateUrl?.resolvedPath ?? filePath,
+    parseOptions,
+  );
 }

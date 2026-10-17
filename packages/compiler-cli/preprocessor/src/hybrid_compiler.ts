@@ -18,6 +18,7 @@ import * as fsSync from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as path from 'path';
 import {makeClassKey} from './compiler-utils.js';
+import {withErrorGuide} from './diagnostic.js';
 import {ChunkContext, FileAnalysis, getOrCreateFileAnalysis} from './file_analysis.js';
 import {IndexedComponent} from './indexer_api.js';
 import {getIndexedComponents, getIndexedComponentsSync} from './indexing/indexer.js';
@@ -205,7 +206,11 @@ export class HybridCompiler {
     this.complianceMode = options.complianceMode ?? false;
     this.workspaceName = options.workspaceName;
     if (options.rootDirs) {
-      const baseDir = options.rootDir ? options.rootDir.replace(/\\/g, '/') : '/';
+      const baseDir = options.rootDir
+        ? options.rootDir.replace(/\\/g, '/')
+        : options.tsconfigPath
+          ? path.posix.dirname(options.tsconfigPath.replace(/\\/g, '/'))
+          : '/';
       this.rootDirs = options.rootDirs.map((d) => {
         const norm = d.replace(/\\/g, '/');
         if (norm.startsWith('/') || /^[a-zA-Z]:/.test(norm)) {
@@ -247,13 +252,10 @@ export class HybridCompiler {
   async prepareChunk(chunk: nga.CompilationChunk): Promise<ChunkContext> {
     for (const file of chunk.files) {
       if (file.diagnostics) {
-        this.diagnosticsMap.set(file.filePath, file.diagnostics);
+        this.diagnosticsMap.set(file.filePath, file.diagnostics.map(withErrorGuide));
       }
     }
     await this.writeDiagnosticsFile();
-
-    const remoteScopedClasses = new Set<string>();
-    const eagerlyUsedDeclarations = new Map<string, nga.DeclarationMetadata[]>();
 
     const boundFiles = await Promise.all(
       chunk.files.map(async (file) => ({
@@ -267,7 +269,7 @@ export class HybridCompiler {
   prepareChunkSync(chunk: nga.CompilationChunk): ChunkContext {
     for (const file of chunk.files) {
       if (file.diagnostics) {
-        this.diagnosticsMap.set(file.filePath, file.diagnostics);
+        this.diagnosticsMap.set(file.filePath, file.diagnostics.map(withErrorGuide));
       }
     }
     this.writeDiagnosticsFileSync();
@@ -722,7 +724,7 @@ export class HybridCompiler {
       for (const diag of processed.diagnostics) {
         const targetPath = diag.filePath || normPath;
         const existing = this.diagnosticsMap.get(targetPath) || [];
-        existing.push(diag);
+        existing.push(withErrorGuide(diag));
         this.diagnosticsMap.set(targetPath, existing);
       }
     }

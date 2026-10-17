@@ -32,8 +32,26 @@ function canonicalizeSegmentQuotes(segment: string): string {
   });
 }
 
-function canonicalizeStringQuotes(code: string, ellipsisToken = '\u2026'): string {
+/** Rewrites single-quoted string literals in `code` to double quotes, as TypeScript emits them. */
+export function canonicalizeStringQuotes(code: string, ellipsisToken = '\u2026'): string {
   return code.split(ellipsisToken).map(canonicalizeSegmentQuotes).join(ellipsisToken);
+}
+
+/**
+ * Normalizes a fragment of NGP-emitted code for comparison against the corresponding fragment of
+ * ngtsc-emitted code, e.g. the generated side of a source-map segment.
+ *
+ * NGP's printer quotes strings, parenthesizes and breaks lines differently from ngtsc's
+ * TypeScript emit, which also escapes non-ASCII characters. `normalizeNgpEmitForComparison`
+ * handles whole files with a parser, which can't run on a fragment, so this is a text-only
+ * approximation: quotes are canonicalized, `\uXXXX` escapes decoded, and parentheses and
+ * whitespace runs dropped.
+ */
+export function normalizeNgpSourceMapSegment(code: string): string {
+  return canonicalizeStringQuotes(code)
+    .replace(/\\u([0-9a-fA-F]{4})/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)))
+    .replace(/[()]/g, '')
+    .replace(/\s+/g, ' ');
 }
 
 function transformOutsideStringLikeTokens(
