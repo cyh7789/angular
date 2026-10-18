@@ -162,7 +162,12 @@ export interface ProcessedFile {
 function unprocessedFile(s: MagicString): ProcessedFile {
   return {
     magicString: s,
-    generateSourceMap: (options = {}) => s.generateMap({hires: true, ...options}),
+    generateSourceMap: (options = {}) =>
+      s.generateMap({
+        ...options,
+        // Disable high resolution source maps, because they use a lot of memory.
+        hires: 'boundary',
+      }),
   };
 }
 
@@ -1396,7 +1401,7 @@ export function processFileSync(
         encapsulation: encapsulationValue,
         animations: component.animationsSpan ? rawSlice(s, component.animationsSpan, guards) : null,
         changeDetection: changeDetectionValue,
-        relativeContextFilePath: filePath,
+        relativeContextFilePath: getRelativeContextFilePath(filePath, ctx),
         i18nUseExternalIds: ctx.i18nUseExternalIds ?? true,
         // Project-relative path of the file the template's text lives in: the `templateUrl`
         // resource, or this file for an inline template. Only `ɵɵattachSourceLocations` reads it,
@@ -2330,6 +2335,14 @@ function getProjectRelativePath(filePath: string, ctx: HybridCompilerContext): s
  */
 function getHmrFilePath(filePath: string, ctx: HybridCompilerContext): string {
   return getProjectRelativePath(filePath, ctx) ?? filePath;
+}
+
+/**
+ * Project-relative path used to compute Closure `goog.getMsg` message variable names. Matches
+ * ngtsc's selection of the rootDir producing the shortest relative path without a leading slash.
+ */
+function getRelativeContextFilePath(filePath: string, ctx: HybridCompilerContext): string {
+  return (getProjectRelativePath(filePath, ctx) ?? filePath).replace(/^\/+/, '');
 }
 
 /** The `ɵsetClassDebugInfo(...)` statement for a component (not yet printed). */
