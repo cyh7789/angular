@@ -72,7 +72,12 @@ import {
   stripIife,
   type MinimalDirectiveMeta,
 } from './compiler-utils.js';
-import {ChunkContext, FileAnalysis, getOrCreateFileAnalysis} from './file_analysis.js';
+import {
+  ChunkContext,
+  FileAnalysis,
+  ParsedComponentTemplate,
+  getOrCreateFileAnalysis,
+} from './file_analysis.js';
 import {analyzeForeignComponentFeatures} from './foreign_component.js';
 import {extractHmrMetadata, getHmrUpdateDeclaration} from './hmr.js';
 import type {IAnalyzer} from './hybrid_compiler.js';
@@ -175,7 +180,7 @@ export function buildTcbTargets(
   filePath: string,
   content: string,
   classes: nga.ClassMetadata[],
-  templatesByClass: Map<string, any>,
+  templatesByClass: Map<string, ParsedComponentTemplate>,
   options: Partial<ParseTemplateOptions> = {},
   tcbConfig: NgpTypeCheckingConfig,
 ): TcbTargetInput[] {
@@ -218,7 +223,7 @@ export function buildTcbTargets(
         classMeta: cls,
         className,
         template: component.template || '',
-        templateNodes: parsed.nodes,
+        templateNodes: parsed.diagNodes,
         declarations: component.resolvedDeclarations ?? [],
         enableSelectorless: options.enableSelectorless ?? false,
         selectorlessEnabled,
@@ -303,7 +308,7 @@ export async function processFile(
   }
   const fileAnalysis = getOrCreateFileAnalysis(rawCtx.fileCache, filePath);
   if (!fileAnalysis.parsedTemplates) {
-    fileAnalysis.parsedTemplates = new Map<string, ParsedTemplate>();
+    fileAnalysis.parsedTemplates = new Map<string, ParsedComponentTemplate>();
   }
   const templatesByClass = fileAnalysis.parsedTemplates;
   const resourceMap = new Map<string, nga.ResolvedResource | null>();
@@ -383,7 +388,7 @@ export function processFileSync(
   let fileAnalysis = getOrCreateFileAnalysis(ctx.fileCache, filePath);
   let templatesByClass = fileAnalysis.parsedTemplates;
   if (!templatesByClass) {
-    templatesByClass = new Map<string, any>();
+    templatesByClass = new Map<string, ParsedComponentTemplate>();
     fileAnalysis.parsedTemplates = templatesByClass;
   }
 
@@ -484,14 +489,11 @@ export function processFileSync(
         const predicateStr = query.predicateSelectors
           ? rawPred
           : `${coreNamespace}.forwardRef(() => ${rawPred})`;
-        const optionsObj: string[] = ['isSignal: true'];
-        if (query.readSpan) {
-          const readStr = s.original.slice(query.readSpan.start, query.readSpan.end);
-          optionsObj.push(`read: ${readStr}`);
+        const optionsObj: string[] = [];
+        if (query.optionsSpan) {
+          optionsObj.push(`...${s.original.slice(query.optionsSpan.start, query.optionsSpan.end)}`);
         }
-        if (!query.isView && query.descendants) {
-          optionsObj.push('descendants: true');
-        }
+        optionsObj.push('isSignal: true');
         const optionsStr = `({${optionsObj.join(', ')}} as any)`;
         s.appendLeft(
           query.propertySpan!.start,
@@ -2183,34 +2185,28 @@ function buildPropDecoratorsExpr(
       ]);
     }
 
-    const queryOptionsProps: {key: string; value: o.Expression; quoted: boolean}[] = [
-      {key: 'isSignal', value: o.literal(true), quoted: false},
-    ];
-    if (query.readSpan) {
+    const queryOptionsEntries: o.LiteralMapEntry[] = [];
+    if (query.optionsSpan) {
       // TODO(cleanup): `laterDeclarationReferences` only covers decorator arguments, so a signal
-      // query's `read` naming a later declaration is unguarded and fails `tsc` inside the static
+      // query's options naming a later declaration is unguarded and fails `tsc` inside the static
       // block.
-      const readStr = s.original.slice(query.readSpan.start, query.readSpan.end);
-      queryOptionsProps.push({
-        key: 'read',
-        value: new o.WrappedNodeExpr(new RawSource(readStr, [query.readSpan])),
-        quoted: false,
-      });
+      const optionsStr = s.original.slice(query.optionsSpan.start, query.optionsSpan.end);
+      queryOptionsEntries.push(
+        new o.LiteralMapSpreadAssignment(
+          new o.WrappedNodeExpr(new RawSource(optionsStr, [query.optionsSpan])),
+        ),
+      );
     }
-    if (!query.isView && query.descendants) {
-      queryOptionsProps.push({
-        key: 'descendants',
-        value: o.literal(true),
-        quoted: false,
-      });
-    }
+    queryOptionsEntries.push(
+      new o.LiteralMapPropertyAssignment('isSignal', o.literal(true), false),
+    );
 
     entry.decorators.push(
       o.literalMap([
         {key: 'type', value: new o.ExternalExpr(queryIdentifier), quoted: false},
         {
           key: 'args',
-          value: o.literalArr([predicateExpr, o.literalMap(queryOptionsProps)]),
+          value: o.literalArr([predicateExpr, new o.LiteralMapExpr(queryOptionsEntries)]),
           quoted: false,
         },
       ]),
@@ -3050,21 +3046,19 @@ function createStaticField(
   if (!pure) {
     return `  ${nocollapse}${tsignore}\n  static ${name}${typeSuffix} = ${value};\n`;
   }
-  if (!isClosureCompilerEnabled) {
-    return `  ${nocollapse}${tsignore}\n  static ${name}${typeSuffix} = /*@__PURE__*/ ${value};\n`;
-  }
-  // ngtsc attaches the Closure annotation as a synthetic comment during its own emit, so it
-  // always lands right in front of the call. This output is compiled by a downstream `tsc`,
-  // whose emitter drops a comment sitting between `=` and the initializer whenever it rewrites
-  // the property (stripping the type annotation, or downleveling the static field to
+  const pureComment = isClosureCompilerEnabled ? '/** @pureOrBreakMyCode */' : '/*@__PURE__*/';
+  // ngtsc attaches the pure annotation as a synthetic comment during its own emit, so it always
+  // lands right in front of the call. This output is compiled by a downstream `tsc`, whose
+  // emitter drops a comment sitting between `=` and the initializer whenever it rewrites the
+  // property (stripping the type annotation, or downleveling the static field to
   // `Class.ɵcmp = ...`), but preserves it as leading trivia of an initializer that starts on its
-  // own line. The initializer line gets its own `// @ts-ignore`, since the one above `static`
-  // no longer reaches it.
+  // own line. The initializer line gets its own `// @ts-ignore`, since the one above `static` no
+  // longer reaches it.
   return (
     `  ${nocollapse}${tsignore}\n` +
     `  static ${name}${typeSuffix} =\n` +
     `    ${tsignore}\n` +
-    `    /** @pureOrBreakMyCode */ ${value};\n`
+    `    ${pureComment} ${value};\n`
   );
 }
 
@@ -3186,28 +3180,43 @@ function parseComponentTemplate(
   filePath: string,
   content: string,
   options: Partial<ParseTemplateOptions> = {},
-): ParsedTemplate {
+): ParsedComponentTemplate {
   const parseOptions: Partial<ParseTemplateOptions> = {
     ...options,
     preserveWhitespaces: component.preserveWhitespaces ?? options.preserveWhitespaces ?? false,
   };
+  const diagParseOptions: Partial<ParseTemplateOptions> = {
+    ...options,
+    preserveWhitespaces: true,
+    preserveLineEndings: true,
+    preserveSignificantWhitespace: true,
+    leadingTriviaChars: [],
+  };
+
   // A `template` literal is parsed out of this file's source text so its spans are offsets
   // into it. An external template, or an inline one computed by any other expression, is parsed
   // on its own: its spans are offsets into the template string (ngtsc's `external` and
   // `indirect` source mappings).
-  // TODO(parity): ngtsc's `parseExtractedTemplate` also parses a second, span-faithful copy
-  // (`diagNodes`: whitespace, line endings and leading trivia preserved) that type-checking
-  // binds against. Only this primary parse exists here, so spans that line-ending
-  // normalization moves (e.g. an ICU switch value after CRLF line breaks) can still drift.
+  // Mirroring ngtsc's `parseExtractedTemplate`, also parse a second, span-faithful copy
+  // (`diagNodes`: whitespace, line endings and leading trivia preserved) for type-checking,
+  // diagnostics, and indexing.
   const contentSpan = component.templateContentSpan;
   if (component.templateUrl == null && contentSpan != null) {
-    return parseDirectInlineTemplate(content, filePath, contentSpan, parseOptions);
+    const parsed = parseDirectInlineTemplate(content, filePath, contentSpan, parseOptions);
+    const diagNodes = parseDirectInlineTemplate(
+      content,
+      filePath,
+      contentSpan,
+      diagParseOptions,
+    ).nodes;
+    return {...parsed, diagNodes};
   }
+
   // The URL identifies the file the spans are offsets into, which for an external template is
   // the template file itself (as in ngtsc's `extractTemplate`).
-  return parseTemplate(
-    component.template || '',
-    component.templateUrl?.resolvedPath ?? filePath,
-    parseOptions,
-  );
+  const templateStr = component.template || '';
+  const templateUrl = component.templateUrl?.resolvedPath ?? filePath;
+  const parsed = parseTemplate(templateStr, templateUrl, parseOptions);
+  const diagNodes = parseTemplate(templateStr, templateUrl, diagParseOptions).nodes;
+  return {...parsed, diagNodes};
 }
