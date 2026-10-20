@@ -1,7 +1,9 @@
 use oxc_ast::ast::{Argument, Expression, ObjectPropertyKind};
 use oxc_span::GetSpan;
 
-use crate::analyzer::class_data::{AngularField, InputData, OutputData, TransformData, ValueIssue};
+use crate::analyzer::class_data::{
+    AngularField, InputData, MemberAccessLevel, OutputData, TransformData, ValueIssue,
+};
 use crate::analyzer::evaluated_io::{
     read_input_options, read_output_alias, ClassMemberFacts, IoKind, MemberIoOptions, Read,
 };
@@ -15,9 +17,28 @@ pub struct ExtractContext<'a, 'e> {
 }
 
 use super::utils::{
-    extract_literal_string, extract_property_key, get_decorator_args, is_angular_decorator_named,
-    resolve_angular_call, ResolvedAngularCall,
+    decorator_local_name, extract_literal_string, extract_property_key, get_decorator_args,
+    is_angular_decorator_named, resolve_angular_call, ResolvedAngularCall,
 };
+
+fn check_io_decorator_arity<'a, 'b>(
+    decorator: &'b oxc_ast::ast::Decorator<'a>,
+    name: &str,
+    out: &mut MemberIo,
+) -> Result<&'b [Argument<'a>], ()> {
+    let args: &[Argument<'a>] = get_decorator_args(decorator).map_or(&[], |args| args);
+    if args.len() <= 1 {
+        return Ok(args);
+    }
+    out.issues.push(ValueIssue::arity_wrong(
+        decorator.span,
+        format!(
+            "@{name} can have at most one argument, got {} argument(s)",
+            args.len()
+        ),
+    ));
+    Err(())
+}
 
 /// Member-level input/output extraction results, including class member facts for binding
 /// decorator metadata arrays, pending cross-file `@Input`/`@Output` arguments, and diagnostics.
@@ -60,10 +81,8 @@ fn evaluate_member_argument<T>(
             None
         }
         Read::Invalid(message) => {
-            out.issues.push(ValueIssue {
-                span: decorator_span,
-                message,
-            });
+            out.issues
+                .push(ValueIssue::wrong_type(decorator_span, message));
             None
         }
     }
@@ -72,15 +91,13 @@ fn evaluate_member_argument<T>(
 /// `@Input('alias')` or `@Input({alias, required, transform})`. ngtsc evaluates the argument;
 /// a transform is emitted from its source text, so it is read from an object literal only.
 fn decorator_input_options(
-    decorator: &oxc_ast::ast::Decorator<'_>,
+    args: &[Argument<'_>],
     member: &str,
+    decorator_span: oxc_span::Span,
     ctx: &ExtractContext<'_, '_>,
     out: &mut MemberIo,
 ) -> InputOptions {
-    let Some(first) = get_decorator_args(decorator).and_then(|args| args.first()) else {
-        return InputOptions::default();
-    };
-    let Some(arg) = first.as_expression() else {
+    let Some(arg) = args.first().and_then(Argument::as_expression) else {
         return InputOptions::default();
     };
     let transform = match arg.get_inner_expression() {
@@ -91,7 +108,7 @@ fn decorator_input_options(
         IoKind::Input,
         arg,
         member,
-        decorator.span,
+        decorator_span,
         read_input_options,
         ctx,
         out,
@@ -119,7 +136,10 @@ pub fn parse_input_decorator(
     if !is_angular_decorator_named(decorator, "Input", ctx.semantic, ctx.angular_imports) {
         return None;
     }
-    let options = decorator_input_options(decorator, prop_name, ctx, out);
+    // ngtsc names the decorator as written (`decorator.name`), e.g. an import alias.
+    let written_name = decorator_local_name(decorator).unwrap_or("Input");
+    let args = check_io_decorator_arity(decorator, written_name, out).ok()?;
+    let options = decorator_input_options(args, prop_name, decorator.span, ctx, out);
 
     let has_transform = options.transform.is_some();
     Some((
@@ -148,8 +168,9 @@ pub fn parse_output_decorator<'a>(
     if !is_angular_decorator_named(decorator, "Output", ctx.semantic, ctx.angular_imports) {
         return None;
     }
-    let alias = get_decorator_args(decorator)
-        .and_then(|args| args.first())
+    let args = check_io_decorator_arity(decorator, "Output", out).ok()?;
+    let alias = args
+        .first()
         .and_then(Argument::as_expression)
         .and_then(|arg| {
             evaluate_member_argument(
@@ -172,38 +193,77 @@ pub fn parse_output_decorator<'a>(
     })
 }
 /// Check if property is initialized with input(), output() or model()
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SignalMember {
+    Input,
+    Model,
+    Output,
+}
+
+/// The access levels `input()`, `model()`, `output()` and `outputFromObservable()` accept.
+const IO_ALLOWED_ACCESS_LEVELS: [MemberAccessLevel; 3] = [
+    MemberAccessLevel::PublicWritable,
+    MemberAccessLevel::PublicReadonly,
+    MemberAccessLevel::Protected,
+];
+
+/// Check if property is initialized with input(), output() or model(), recording the field.
+/// Returns which API it was, or `None` when the initializer is not one (or was rejected).
 fn parse_signal_input_output(
     prop: &oxc_ast::ast::PropertyDefinition,
     ctx: &ExtractContext<'_, '_>,
     out: &mut MemberIo,
-) -> bool {
-    let Some(init) = prop.value.as_ref() else {
-        return false;
+) -> Option<SignalMember> {
+    let init = prop.value.as_ref()?;
+    let Expression::CallExpression(call) = init.get_inner_expression() else {
+        return None;
+    };
+    let prop_name = super::utils::class_member_name(&prop.key)?.into_owned();
+    let resolved_call = resolve_angular_call(call, ctx.semantic, ctx.angular_imports)?;
+
+    let (kind, is_required, options_arg) = match resolved_call {
+        ResolvedAngularCall::Input { is_required } => (
+            SignalMember::Input,
+            is_required,
+            call.arguments.get(usize::from(!is_required)),
+        ),
+        ResolvedAngularCall::Model { is_required } => (
+            SignalMember::Model,
+            is_required,
+            call.arguments.get(usize::from(!is_required)),
+        ),
+        ResolvedAngularCall::Output { is_required } => {
+            (SignalMember::Output, is_required, call.arguments.first())
+        }
+        ResolvedAngularCall::OutputFromObservable { is_required } => {
+            (SignalMember::Output, is_required, call.arguments.get(1))
+        }
+        _ => return None,
     };
 
-    let call = match init.get_inner_expression() {
-        Expression::CallExpression(c) => c,
-        _ => return false,
-    };
+    if kind == SignalMember::Output && is_required {
+        out.issues.push(ValueIssue::no_required_function(
+            call.span,
+            "Output does not support \".required()\".",
+        ));
+        return None;
+    }
 
-    let Some(prop_name_cow) = extract_property_key(&prop.key) else {
-        return false;
-    };
-    let prop_name = prop_name_cow.into_owned();
+    let access_level = MemberAccessLevel::of(&prop.key, prop.accessibility, prop.readonly);
+    if !IO_ALLOWED_ACCESS_LEVELS.contains(&access_level) {
+        out.issues.push(ValueIssue::disallowed_member_visibility(
+            call.span,
+            resolved_call.function_name(),
+            access_level,
+            &IO_ALLOWED_ACCESS_LEVELS,
+        ));
+        return None;
+    }
 
-    let Some(resolved_call) = resolve_angular_call(call, ctx.semantic, ctx.angular_imports) else {
-        return false;
-    };
-
-    match resolved_call {
-        ResolvedAngularCall::Input { is_required } => {
-            let options_arg = if is_required {
-                call.arguments.first()
-            } else {
-                call.arguments.get(1)
-            };
-            let options = signal_options(options_arg, out);
-            let input = InputData {
+    let options = signal_options(options_arg, out)?;
+    match kind {
+        SignalMember::Input => {
+            out.fields.push(AngularField::Input(InputData {
                 name: prop_name,
                 alias: options.alias,
                 required: is_required,
@@ -213,20 +273,16 @@ fn parse_signal_input_output(
                 transform: options.transform,
                 is_restricted: false,
                 is_literal: false,
-            };
-            out.fields.push(AngularField::Input(input));
-            true
+            }));
         }
-        ResolvedAngularCall::Model { is_required } => {
-            let options_arg = if is_required {
-                call.arguments.first()
-            } else {
-                call.arguments.get(1)
-            };
-            let options = signal_options(options_arg, out);
-            let input = InputData {
+        SignalMember::Model => {
+            let output_alias = Some(format!(
+                "{}Change",
+                options.alias.as_deref().unwrap_or(&prop_name)
+            ));
+            out.fields.push(AngularField::Input(InputData {
                 name: prop_name.clone(),
-                alias: options.alias.clone(),
+                alias: options.alias,
                 required: is_required,
                 is_signal: true,
                 decorator_span: None,
@@ -234,65 +290,42 @@ fn parse_signal_input_output(
                 transform: None,
                 is_restricted: false,
                 is_literal: false,
-            };
-            let output_alias = Some(format!(
-                "{}Change",
-                options.alias.as_ref().unwrap_or(&prop_name)
-            ));
-            let output = OutputData {
+            }));
+            out.fields.push(AngularField::Output(OutputData {
                 name: prop_name,
                 alias: output_alias,
                 decorator_span: None,
                 property_span: Some(prop.span),
                 is_signal: true,
-            };
-            out.fields.push(AngularField::Input(input));
-            out.fields.push(AngularField::Output(output));
-            true
+            }));
         }
-        ResolvedAngularCall::Output => {
-            let options = signal_options(call.arguments.first(), out);
-            let output = OutputData {
+        SignalMember::Output => {
+            out.fields.push(AngularField::Output(OutputData {
                 name: prop_name,
                 alias: options.alias,
                 is_signal: true,
                 decorator_span: None,
                 property_span: Some(prop.span),
-            };
-            out.fields.push(AngularField::Output(output));
-            false
+            }));
         }
-        ResolvedAngularCall::OutputFromObservable => {
-            let options = signal_options(call.arguments.get(1), out);
-            let output = OutputData {
-                name: prop_name,
-                alias: options.alias,
-                is_signal: true,
-                decorator_span: None,
-                property_span: Some(prop.span),
-            };
-            out.fields.push(AngularField::Output(output));
-            false
-        }
-        _ => false,
     }
+    Some(kind)
 }
 
 /// The options argument of `input()`, `model()`, `output()` or `outputFromObservable()`, read
 /// the way ngtsc's `parseAndValidateInputAndOutputOptions` reads it: *not* evaluated. The
 /// argument must be an object literal and its `alias` a string literal; anything else is
-/// reported rather than followed through a constant.
-fn signal_options(arg: Option<&Argument>, out: &mut MemberIo) -> InputOptions {
-    let Some(arg) = arg.and_then(Argument::as_expression) else {
-        return InputOptions::default();
+/// reported rather than followed through a constant, and `None` says so.
+fn signal_options(arg: Option<&Argument>, out: &mut MemberIo) -> Option<InputOptions> {
+    let Some(arg) = arg else {
+        return Some(InputOptions::default());
     };
-    let Expression::ObjectExpression(obj) = arg else {
-        out.issues.push(ValueIssue {
-            span: arg.span(),
-            message: "Argument needs to be an object literal that is statically analyzable."
-                .to_string(),
-        });
-        return InputOptions::default();
+    let Some(Expression::ObjectExpression(obj)) = arg.as_expression() else {
+        out.issues.push(ValueIssue::wrong_type(
+            arg.span(),
+            "Argument needs to be an object literal that is statically analyzable.",
+        ));
+        return None;
     };
 
     let mut alias = None;
@@ -305,18 +338,19 @@ fn signal_options(arg: Option<&Argument>, out: &mut MemberIo) -> InputOptions {
         }
         alias = extract_literal_string(&p.value);
         if alias.is_none() {
-            out.issues.push(ValueIssue {
-                span: p.value.span(),
-                message: "Alias needs to be a string that is statically analyzable.".to_string(),
-            });
+            out.issues.push(ValueIssue::wrong_type(
+                p.value.span(),
+                "Alias needs to be a string that is statically analyzable.",
+            ));
+            return None;
         }
     }
 
-    InputOptions {
+    Some(InputOptions {
         alias,
         required: false,
         transform: object_literal_transform(obj),
-    }
+    })
 }
 
 /// The `transform` of an input options object written as a literal: emitted from its source
@@ -346,6 +380,18 @@ pub(crate) fn object_literal_transform(
     })
 }
 
+fn disallowed_decorator_message(decorator: &str, signal: SignalMember) -> Option<&'static str> {
+    match (decorator, signal) {
+        ("Input", SignalMember::Input) => Some("Using @Input with a signal input is not allowed."),
+        ("Input", SignalMember::Model) => Some("Using @Input with a model input is not allowed."),
+        ("Output", SignalMember::Output) => {
+            Some("Using \"@Output\" with \"output()\" is not allowed.")
+        }
+        ("Output", SignalMember::Model) => Some("Using @Output with a model input is not allowed."),
+        _ => None,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn process_decorators<'a>(
     decorators: &'a [oxc_ast::ast::Decorator<'a>],
@@ -353,14 +399,29 @@ fn process_decorators<'a>(
     key: &'a oxc_ast::ast::PropertyKey<'a>,
     accessibility: Option<oxc_ast::ast::TSAccessibility>,
     readonly: bool,
-    is_signal: bool,
+    is_static: bool,
+    signal: Option<SignalMember>,
     property_span: Option<oxc_span::Span>,
+    fields_start: usize,
     ctx: &ExtractContext<'_, '_>,
     out: &mut MemberIo,
 ) {
-    let mut is_input = is_signal;
+    let mut is_input = matches!(signal, Some(SignalMember::Input | SignalMember::Model));
 
     for decorator in decorators {
+        let collision = signal.and_then(|signal| {
+            ["Input", "Output"]
+                .into_iter()
+                .find(|name| {
+                    is_angular_decorator_named(decorator, name, ctx.semantic, ctx.angular_imports)
+                })
+                .and_then(|name| disallowed_decorator_message(name, signal))
+        });
+        if let Some(message) = collision {
+            out.issues
+                .push(ValueIssue::disallowed_decorator(decorator.span, message));
+            continue;
+        }
         if let Some((input, _transform)) =
             parse_input_decorator(decorator, prop_name, property_span, ctx, out)
         {
@@ -377,19 +438,21 @@ fn process_decorators<'a>(
         || accessibility == Some(oxc_ast::ast::TSAccessibility::Protected)
         || readonly;
     let is_literal = matches!(key, oxc_ast::ast::PropertyKey::StringLiteral(_));
-    if let Some(span) = property_span {
-        out.members.push(ClassMemberFacts {
-            name: prop_name.to_string(),
-            span,
-            is_restricted,
-            is_literal,
-        });
+    if !is_static {
+        if let Some(span) = property_span {
+            out.members.push(ClassMemberFacts {
+                name: prop_name.to_string(),
+                span,
+                is_restricted,
+                is_literal,
+            });
+        }
     }
 
     if !is_input {
         return;
     }
-    let input = out.fields.iter_mut().find_map(|f| match f {
+    let input = out.fields[fields_start..].iter_mut().find_map(|f| match f {
         AngularField::Input(i) if i.name == prop_name => Some(i),
         _ => None,
     });
@@ -413,11 +476,15 @@ pub fn extract_inputs_outputs<'a>(
     };
     let mut out = MemberIo::default();
     let mut static_coerced = Vec::new();
+    let class_name = class.id.as_ref().map(|id| id.name.as_str());
 
     for element in &class.body.body {
-        match element {
+        let fields_start = out.fields.len();
+        let pending_start = out.pending_options.len();
+        let (prop_name, is_static, declaration_span) = match element {
             oxc_ast::ast::ClassElement::PropertyDefinition(prop) => {
-                let Some(prop_name) = extract_property_key(&prop.key).map(|n| n.into_owned())
+                let Some(prop_name) =
+                    super::utils::class_member_name(&prop.key).map(|n| n.into_owned())
                 else {
                     continue;
                 };
@@ -426,7 +493,7 @@ pub fn extract_inputs_outputs<'a>(
                     static_coerced.push(prop_name["ngAcceptInputType_".len()..].to_string());
                 }
 
-                let is_signal = parse_signal_input_output(prop, &ctx, &mut out);
+                let signal = parse_signal_input_output(prop, &ctx, &mut out);
 
                 process_decorators(
                     &prop.decorators,
@@ -434,11 +501,15 @@ pub fn extract_inputs_outputs<'a>(
                     &prop.key,
                     prop.accessibility,
                     prop.readonly,
-                    is_signal,
+                    prop.r#static,
+                    signal,
                     Some(prop.span),
+                    fields_start,
                     &ctx,
                     &mut out,
                 );
+                let declaration_span = prop.value.as_ref().map_or(prop.span, GetSpan::span);
+                (prop_name, prop.r#static, declaration_span)
             }
             oxc_ast::ast::ClassElement::MethodDefinition(method) => {
                 let Some(prop_name) = extract_property_key(&method.key).map(|n| n.into_owned())
@@ -452,11 +523,14 @@ pub fn extract_inputs_outputs<'a>(
                     &method.key,
                     method.accessibility,
                     false,
-                    false,
+                    method.r#static,
+                    None,
                     Some(method.span),
+                    fields_start,
                     &ctx,
                     &mut out,
                 );
+                (prop_name, method.r#static, method.span)
             }
             oxc_ast::ast::ClassElement::AccessorProperty(acc) => {
                 let Some(prop_name) = extract_property_key(&acc.key).map(|n| n.into_owned()) else {
@@ -469,13 +543,28 @@ pub fn extract_inputs_outputs<'a>(
                     &acc.key,
                     acc.accessibility,
                     false,
-                    false,
+                    acc.r#static,
+                    None,
                     Some(acc.span),
+                    fields_start,
                     &ctx,
                     &mut out,
                 );
+                (prop_name, acc.r#static, acc.span)
             }
-            _ => {}
+            _ => continue,
+        };
+
+        if is_static {
+            reject_static_member_io(
+                &prop_name,
+                class_name,
+                element.span(),
+                declaration_span,
+                fields_start,
+                pending_start,
+                &mut out,
+            );
         }
     }
 
@@ -483,6 +572,46 @@ pub fn extract_inputs_outputs<'a>(
         out.fields.push(AngularField::InputCoercion(field));
     }
     out
+}
+
+fn reject_static_member_io(
+    prop_name: &str,
+    class_name: Option<&str>,
+    member_span: oxc_span::Span,
+    declaration_span: oxc_span::Span,
+    fields_start: usize,
+    pending_start: usize,
+    out: &mut MemberIo,
+) {
+    let mut declares_input = false;
+    let mut output_anchor = None;
+    for field in out.fields.drain(fields_start..) {
+        match field {
+            AngularField::Input(_) => {
+                declares_input = true;
+            }
+            AngularField::Output(output) => {
+                output_anchor = Some(output.decorator_span.unwrap_or(declaration_span));
+            }
+            _ => {}
+        }
+    }
+    out.pending_options.truncate(pending_start);
+
+    if declares_input {
+        let class_name = class_name.unwrap_or_default();
+        out.issues.push(ValueIssue::declared_on_static_member(
+            member_span,
+            format!(
+                "Input \"{prop_name}\" is incorrectly declared as static member of \"{class_name}\"."
+            ),
+        ));
+    } else if let Some(anchor) = output_anchor {
+        out.issues.push(ValueIssue::declared_on_static_member(
+            anchor,
+            "Output is incorrectly declared on a static class member.",
+        ));
+    }
 }
 
 #[cfg(test)]
@@ -1047,7 +1176,125 @@ mod tests {
         let messages: Vec<&str> = ext.issues.iter().map(|i| i.message.as_str()).collect();
         assert_eq!(
             messages,
-            vec!["@Input decorator argument must resolve to a string or an object literal"]
+            vec!["@Input decorator argument must resolve to a string or an object literal\n  Value is of type 'number'."]
+        );
+    }
+
+    #[test]
+    fn test_io_decorator_arity_issues() {
+        let source = r#"import {Input, Output, Input as NgInput} from '@angular/core';
+        class TestComponent {
+            @Input('name', 'invalid-extra-arg') tooManyInput: string;
+            @NgInput('a', 'b', 'c') aliased: string;
+            @Output('name', 'invalid-extra-arg') tooManyOutput = new EventEmitter();
+            @Input('ok') fine: string;
+        }
+        "#;
+
+        let ext = parse_class(source);
+        assert_eq!(
+            ext.inputs
+                .iter()
+                .map(|i| i.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["fine"]
+        );
+        assert!(ext.outputs.is_empty());
+        let issues: Vec<(&str, &str, &str)> = ext
+            .issues
+            .iter()
+            .map(|i| {
+                (
+                    i.code,
+                    i.message.as_str(),
+                    &source[i.span.start as usize..i.span.end as usize],
+                )
+            })
+            .collect();
+        assert_eq!(
+            issues,
+            vec![
+                (
+                    "1002",
+                    "@Input can have at most one argument, got 2 argument(s)",
+                    "@Input('name', 'invalid-extra-arg')"
+                ),
+                (
+                    "1002",
+                    "@NgInput can have at most one argument, got 3 argument(s)",
+                    "@NgInput('a', 'b', 'c')"
+                ),
+                (
+                    "1002",
+                    "@Output can have at most one argument, got 2 argument(s)",
+                    "@Output('name', 'invalid-extra-arg')"
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_static_member_io_issues() {
+        let source = r#"import {Input, Output, input, output, model} from '@angular/core';
+        class TestDir {
+            @Input() static someInput: string = '';
+            static signalInput = input<string>();
+            @Output() static someOutput = new EventEmitter();
+            static signalOutput = output<string>();
+            static someModel = model(0);
+            @Input() fine: string;
+        }
+        "#;
+
+        let ext = parse_class(source);
+        assert_eq!(
+            ext.inputs
+                .iter()
+                .map(|i| i.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["fine"]
+        );
+        assert!(ext.outputs.is_empty());
+        let issues: Vec<(&str, &str, &str)> = ext
+            .issues
+            .iter()
+            .map(|i| {
+                (
+                    i.code,
+                    i.message.as_str(),
+                    &source[i.span.start as usize..i.span.end as usize],
+                )
+            })
+            .collect();
+        assert_eq!(
+            issues,
+            vec![
+                (
+                    "1100",
+                    "Input \"someInput\" is incorrectly declared as static member of \"TestDir\".",
+                    "@Input() static someInput: string = '';"
+                ),
+                (
+                    "1100",
+                    "Input \"signalInput\" is incorrectly declared as static member of \"TestDir\".",
+                    "static signalInput = input<string>();"
+                ),
+                (
+                    "1100",
+                    "Output is incorrectly declared on a static class member.",
+                    "@Output()"
+                ),
+                (
+                    "1100",
+                    "Output is incorrectly declared on a static class member.",
+                    "output<string>()"
+                ),
+                (
+                    "1100",
+                    "Input \"someModel\" is incorrectly declared as static member of \"TestDir\".",
+                    "static someModel = model(0);"
+                ),
+            ]
         );
     }
 
@@ -1066,8 +1313,7 @@ mod tests {
         "#;
 
         let ext = parse_class(source);
-        assert_eq!(ext.inputs[0].alias, None);
-        assert_eq!(ext.inputs[1].alias, None);
+        assert!(ext.inputs.is_empty(), "{:?}", ext.inputs);
         assert_eq!(ext.outputs[0].alias.as_deref(), Some("literalAlias"));
 
         let messages: Vec<&str> = ext.issues.iter().map(|i| i.message.as_str()).collect();

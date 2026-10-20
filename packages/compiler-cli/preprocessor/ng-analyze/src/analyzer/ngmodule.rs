@@ -19,10 +19,6 @@ pub fn parse_decorator<'a>(
     eval: &EvalInput<'a, '_>,
     angular_imports: &crate::analyzer::imports::AngularImports,
 ) -> Option<NgModuleData> {
-    let Expression::CallExpression(call_expr) = &decorator.expression else {
-        return None;
-    };
-
     if !crate::analyzer::utils::is_angular_decorator_named(
         decorator,
         "NgModule",
@@ -31,13 +27,16 @@ pub fn parse_decorator<'a>(
     ) {
         return None;
     }
-    parse_ng_module_args(
-        call_expr,
-        crate::analyzer::utils::extract_decorator_name(decorator),
-        semantic,
-        import_map,
-        eval,
-    )
+    let decorator_name = crate::analyzer::utils::extract_decorator_name(decorator);
+    match &decorator.expression {
+        Expression::CallExpression(call_expr) => {
+            parse_ng_module_args(call_expr, decorator_name, semantic, import_map, eval)
+        }
+        _ => Some(NgModuleData {
+            decorator_name,
+            ..Default::default()
+        }),
+    }
 }
 
 fn parse_ng_module_args<'a>(
@@ -48,7 +47,10 @@ fn parse_ng_module_args<'a>(
     eval: &EvalInput<'a, '_>,
 ) -> Option<NgModuleData> {
     if call_expr.arguments.len() > 1 {
-        return None; // Match Angular diagnostic for too many arguments
+        return Some(NgModuleData {
+            decorator_name,
+            ..Default::default()
+        });
     }
 
     let mut declarations = None;
@@ -58,6 +60,7 @@ fn parse_ng_module_args<'a>(
     let mut exports = None;
     let mut bootstrap = None;
     let mut providers_span = None;
+    let mut providers = None;
     let mut schemas = None;
     let mut id_span = None;
     let mut module_id_span = None;
@@ -138,6 +141,11 @@ fn parse_ng_module_args<'a>(
                                 if !is_empty_array {
                                     providers_span = Some(p.value.span());
                                 }
+                                providers = Some(
+                                    crate::analyzer::di_facts::ProvidersData::from_expression(
+                                        &p.value, eval,
+                                    ),
+                                );
                             }
                             "jit" => {
                                 // https://github.com/angular/angular/blob/83622ee/packages/compiler-cli/src/ngtsc/annotations/ng_module/src/handler.ts#L352-L356
@@ -173,6 +181,7 @@ fn parse_ng_module_args<'a>(
         exports,
         bootstrap,
         providers_span,
+        providers,
         id_span,
         module_id_span,
         schemas,
@@ -181,6 +190,7 @@ fn parse_ng_module_args<'a>(
         imports_span,
         exports_span,
         bootstrap_span,
+        bootstrap_issues: Vec::new(),
         local_imports_element_spans,
         local_exports_element_spans,
         isolated_imports,

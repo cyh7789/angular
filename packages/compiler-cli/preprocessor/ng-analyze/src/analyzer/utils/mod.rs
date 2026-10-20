@@ -111,6 +111,13 @@ pub fn extract_property_key<'a>(key: &'a PropertyKey<'a>) -> Option<std::borrow:
     }
 }
 
+pub fn class_member_name<'a>(key: &'a PropertyKey<'a>) -> Option<std::borrow::Cow<'a, str>> {
+    if let PropertyKey::PrivateIdentifier(ident) = key {
+        return Some(std::borrow::Cow::Owned(format!("#{}", ident.name)));
+    }
+    extract_property_key(key)
+}
+
 /// Extract a literal string value from a StringLiteral or no-substitution TemplateLiteral expression
 /// without performing partial evaluation.
 pub fn extract_literal_string(expr: &Expression<'_>) -> Option<String> {
@@ -873,16 +880,50 @@ pub fn get_type_only_exports(
     type_only
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ResolvedAngularCall {
     Input { is_required: bool },
     Model { is_required: bool },
-    Output,
-    OutputFromObservable,
+    Output { is_required: bool },
+    OutputFromObservable { is_required: bool },
     ViewChild { is_required: bool },
     ViewChildren,
     ContentChild { is_required: bool },
     ContentChildren,
+}
+
+impl ResolvedAngularCall {
+    pub fn function_name(self) -> &'static str {
+        match self {
+            Self::Input { .. } => "input",
+            Self::Model { .. } => "model",
+            Self::Output { .. } => "output",
+            Self::OutputFromObservable { .. } => "outputFromObservable",
+            Self::ViewChild { .. } => "viewChild",
+            Self::ViewChildren => "viewChildren",
+            Self::ContentChild { .. } => "contentChild",
+            Self::ContentChildren => "contentChildren",
+        }
+    }
+
+    pub fn is_required(self) -> bool {
+        match self {
+            Self::Input { is_required }
+            | Self::Model { is_required }
+            | Self::Output { is_required }
+            | Self::OutputFromObservable { is_required }
+            | Self::ViewChild { is_required }
+            | Self::ContentChild { is_required } => is_required,
+            Self::ViewChildren | Self::ContentChildren => false,
+        }
+    }
+
+    pub fn is_required_initializer_candidate(self) -> bool {
+        !matches!(
+            self,
+            Self::Output { .. } | Self::OutputFromObservable { .. }
+        )
+    }
 }
 
 /// Resolve an initializer-API call such as `input()`, `input.required()` or `core.viewChild()` to
@@ -916,9 +957,9 @@ pub fn resolve_angular_call(
     match matched_symbol {
         AngularImportSymbol::InputFn => Some(ResolvedAngularCall::Input { is_required }),
         AngularImportSymbol::ModelFn => Some(ResolvedAngularCall::Model { is_required }),
-        AngularImportSymbol::OutputFn => Some(ResolvedAngularCall::Output),
+        AngularImportSymbol::OutputFn => Some(ResolvedAngularCall::Output { is_required }),
         AngularImportSymbol::OutputFromObservableFn => {
-            Some(ResolvedAngularCall::OutputFromObservable)
+            Some(ResolvedAngularCall::OutputFromObservable { is_required })
         }
         AngularImportSymbol::ViewChildFn => Some(ResolvedAngularCall::ViewChild { is_required }),
         AngularImportSymbol::ViewChildrenFn => Some(ResolvedAngularCall::ViewChildren),
@@ -995,7 +1036,7 @@ pub fn get_canonical_decorator_name<'a>(
 /// The decorator's local name as written (`Cmp` for `@Cmp()`, `Component` for `@core.Component()`),
 /// mirroring ngtsc's `Decorator.name`.
 /// https://github.com/angular/angular/blob/5b525f9/packages/compiler-cli/src/ngtsc/reflection/src/typescript.ts#L446-L450
-fn decorator_local_name<'a>(decorator: &'a Decorator<'a>) -> Option<&'a str> {
+pub(crate) fn decorator_local_name<'a>(decorator: &'a Decorator<'a>) -> Option<&'a str> {
     let callee = match decorator.expression.get_inner_expression() {
         Expression::CallExpression(call) => call.callee.get_inner_expression(),
         Expression::NewExpression(new_expr) => new_expr.callee.get_inner_expression(),
@@ -1086,6 +1127,127 @@ pub fn is_angular_decorator_named<'a>(
     angular_imports: &crate::analyzer::imports::AngularImports,
 ) -> bool {
     get_canonical_decorator_name(decorator, semantic, angular_imports) == Some(name)
+}
+
+pub(crate) fn class_decorator_argument_issue<'a>(
+    decorator: &'a Decorator<'a>,
+    canonical_name: &str,
+) -> Option<crate::analyzer::class_data::ValueIssue> {
+    use crate::analyzer::class_data::ValueIssue;
+
+    // `decorator.args` is `null` for a decorator that is not a call.
+    let args: Option<&[Argument<'a>]> = get_decorator_args(decorator).map(|args| &args[..]);
+    let written_name = decorator_local_name(decorator).unwrap_or(canonical_name);
+    match canonical_name {
+        "Component" | "Directive" => {
+            let args = args.unwrap_or(&[]);
+            match args {
+                [] => None,
+                [meta] => object_literal_argument_issue(
+                    meta,
+                    format!("@{written_name} argument must be an object literal"),
+                ),
+                _ => Some(ValueIssue::arity_wrong(
+                    decorator.span,
+                    format!("Incorrect number of arguments to @{written_name} decorator"),
+                )),
+            }
+        }
+        "NgModule" => match args {
+            Some([]) => None,
+            Some([meta]) => object_literal_argument_issue(
+                meta,
+                "@NgModule argument must be an object literal".to_string(),
+            ),
+            _ => Some(ValueIssue::arity_wrong(
+                decorator.span,
+                "Incorrect number of arguments to @NgModule decorator",
+            )),
+        },
+        "Injectable" => match args {
+            None => Some(ValueIssue::decorator_not_called(
+                decorator.span,
+                "@Injectable must be called",
+            )),
+            Some([]) => None,
+            // Checked as written, without `unwrapExpression`.
+            Some([meta]) => (!matches!(meta, Argument::ObjectExpression(_))).then(|| {
+                ValueIssue::arg_not_literal(
+                    meta.span(),
+                    "@Injectable argument must be an object literal",
+                )
+            }),
+            Some(args) => Some(ValueIssue::arity_wrong(
+                args.get(2).map_or(decorator.span, GetSpan::span),
+                "Too many arguments to @Injectable",
+            )),
+        },
+        "Pipe" => {
+            let Some(args) = args else {
+                return Some(ValueIssue::decorator_not_called(
+                    decorator.span,
+                    "@Pipe must be called",
+                ));
+            };
+            let meta = args.first()?;
+            // `@Pipe(null!)` is tolerated while the public API still requires a name.
+            if let Argument::TSNonNullExpression(non_null) = meta {
+                if matches!(non_null.expression, Expression::NullLiteral(_)) {
+                    return None;
+                }
+            }
+            object_literal_argument_issue(meta, "@Pipe must have a literal argument".to_string())
+        }
+        "Service" => match args {
+            None => Some(ValueIssue::decorator_not_called(
+                decorator.span,
+                "@Service must be called",
+            )),
+            Some([]) => None,
+            Some([Argument::ObjectExpression(meta)]) => service_auto_provided_issue(meta),
+            Some([meta]) => Some(ValueIssue::arg_not_literal(
+                meta.span(),
+                "@Service argument must be an object literal",
+            )),
+            Some(args) => Some(ValueIssue::arity_wrong(
+                args.get(2).map_or(decorator.span, GetSpan::span),
+                "Too many arguments to @Service",
+            )),
+        },
+        _ => None,
+    }
+}
+
+fn service_auto_provided_issue(
+    meta: &oxc_ast::ast::ObjectExpression<'_>,
+) -> Option<crate::analyzer::class_data::ValueIssue> {
+    let value = meta.properties.iter().find_map(|prop| {
+        let oxc_ast::ast::ObjectPropertyKind::ObjectProperty(prop) = prop else {
+            return None;
+        };
+        (extract_property_key(&prop.key)? == "autoProvided").then_some(&prop.value)
+    })?;
+    if matches!(value, Expression::BooleanLiteral(_)) {
+        return None;
+    }
+    Some(crate::analyzer::class_data::ValueIssue::wrong_type(
+        meta.span,
+        "`autoProvided` property must be a boolean literal",
+    ))
+}
+
+fn object_literal_argument_issue(
+    meta: &Argument<'_>,
+    message: String,
+) -> Option<crate::analyzer::class_data::ValueIssue> {
+    let unwrapped = meta.as_expression().map(unwrap_expression);
+    if matches!(unwrapped, Some(Expression::ObjectExpression(_))) {
+        return None;
+    }
+    let span = unwrapped.map_or(meta.span(), GetSpan::span);
+    Some(crate::analyzer::class_data::ValueIssue::arg_not_literal(
+        span, message,
+    ))
 }
 
 /// An initializer-API callee decomposed into its import-binding identifier, optional namespace property,

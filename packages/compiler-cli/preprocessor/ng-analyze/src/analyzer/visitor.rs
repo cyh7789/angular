@@ -13,6 +13,7 @@ use crate::{query::ReferenceId, ConstructorParamMetadata, TemplateGuardMetadata}
 use super::class_data::{
     AngularField, ClassData, ComponentData, DecoratorData, DirectiveData, HostBindingData,
     HostListenerData, InjectableData, NgModuleData, PipeData, ServiceData, TypeParameterData,
+    ValueIssue,
 };
 use super::imports::{
     FileExportInfo, ImportDeclarationInfo, ImportedSymbol, LocalExportAlias, ReexportInfo,
@@ -43,6 +44,7 @@ pub struct ClassVisitor<'a, Fs: ResourceResolverFs> {
     enable_hmr: bool,
     results: Vec<ClassData>,
     registrations: Vec<RegistrationInfo>,
+    di_facts: Vec<super::di_facts::ClassDiFacts>,
     fallback_symbol_id: usize,
     diagnostics: Vec<crate::NgDiagnostic>,
 }
@@ -78,6 +80,7 @@ impl<'a, Fs: ResourceResolverFs> ClassVisitor<'a, Fs> {
             enable_hmr,
             results: Vec::new(),
             registrations: Vec::new(),
+            di_facts: Vec::new(),
             fallback_symbol_id: 1000000,
             diagnostics: Vec::new(),
         }
@@ -89,6 +92,7 @@ impl<'a, Fs: ResourceResolverFs> ClassVisitor<'a, Fs> {
         ClassVisitorOutput {
             classes: self.results,
             registrations: self.registrations,
+            di_facts: self.di_facts,
             file_exports,
             diagnostics: self.diagnostics,
         }
@@ -118,28 +122,6 @@ impl<'a, Fs: ResourceResolverFs> ClassVisitor<'a, Fs> {
             foreign: crate::analyzer::resolvers::angular_foreign_resolvers(),
         };
 
-        let Some(parsed) = process_class_common(
-            class,
-            node_id,
-            self.converter,
-            self.file_path,
-            self.fs,
-            self.resolver,
-            self.import_map,
-            self.angular_imports,
-            self.semantic,
-            self.local_exported_names,
-            &eval,
-            self.enable_hmr,
-        ) else {
-            return;
-        };
-
-        let has_export_keyword = matches!(
-            self.semantic.nodes().parent_kind(node_id),
-            oxc_ast::AstKind::ExportDeclaration(_) | oxc_ast::AstKind::ExportDefaultDeclaration(_)
-        );
-
         let has_real_symbol = class
             .id
             .as_ref()
@@ -155,6 +137,66 @@ impl<'a, Fs: ResourceResolverFs> ClassVisitor<'a, Fs> {
             });
 
         let reference_id = ReferenceId::new(self.file_id, symbol_id);
+        let super_class = evaluate_super_class(class, &eval);
+        self.di_facts.extend(super::di_facts::ts_class_di_facts(
+            class,
+            reference_id,
+            self.semantic,
+            self.angular_imports,
+            super_class.clone(),
+        ));
+
+        if class.decorators.is_empty() {
+            if !self.angular_imports.is_core
+                && class.is_declaration()
+                && uses_angular_features(class, self.semantic, self.angular_imports)
+            {
+                let span = class.id.as_ref().map(|id| id.span).unwrap_or(class.span);
+                super::class_data::push_issue(
+                    &mut self.diagnostics,
+                    self.file_path,
+                    self.converter,
+                    &ValueIssue::undecorated_class_using_angular_features(span),
+                );
+            }
+            return;
+        }
+
+        let Some(parsed) = process_class_common(
+            class,
+            node_id,
+            self.converter,
+            self.file_path,
+            self.fs,
+            self.resolver,
+            self.import_map,
+            self.angular_imports,
+            self.semantic,
+            self.local_exported_names,
+            &eval,
+            self.enable_hmr,
+            super_class,
+        ) else {
+            return;
+        };
+
+        if parsed.primary_decorator_count() > 1 {
+            super::class_data::push_issue(
+                &mut self.diagnostics,
+                self.file_path,
+                self.converter,
+                &ValueIssue::decorator_collision(
+                    parsed.common.decorated_span,
+                    "Two incompatible decorators on class",
+                ),
+            );
+            return;
+        }
+
+        let has_export_keyword = matches!(
+            self.semantic.nodes().parent_kind(node_id),
+            oxc_ast::AstKind::ExportDeclaration(_) | oxc_ast::AstKind::ExportDefaultDeclaration(_)
+        );
         let class_data = classify(reference_id, parsed, has_real_symbol);
 
         // TODO(parity): ngtsc's `isStaticallyExported` also counts export lists
@@ -201,6 +243,26 @@ fn find_matching_field_mut<'a>(
     }
 }
 
+fn query_metadata_collision(
+    existing: &AngularField,
+    member: &AngularField,
+    decorator_name: &str,
+) -> Option<ValueIssue> {
+    let (AngularField::Query(metadata), AngularField::Query(member)) = (existing, member) else {
+        return None;
+    };
+    if !member.is_signal || metadata.property_span.is_some() {
+        return None;
+    }
+    Some(ValueIssue::metadata_collision(
+        metadata.decorator_span?,
+        format!(
+            "Query is declared multiple times. \"@{decorator_name}\" declares a query for the \
+             same property."
+        ),
+    ))
+}
+
 fn populate_directive_members(
     d: &mut DirectiveData,
     members: ParsedMembers,
@@ -209,6 +271,11 @@ fn populate_directive_members(
 ) {
     for member_field in members.fields {
         if let Some(existing) = find_matching_field_mut(&mut d.fields, &member_field) {
+            let decorator_name = d.decorator_name.as_deref().unwrap_or("Directive");
+            d.io_issues.extend(
+                super::class_data::initializer_metadata_collision(&member_field, decorator_name)
+                    .or_else(|| query_metadata_collision(existing, &member_field, decorator_name)),
+            );
             *existing = member_field;
         } else {
             d.fields.push(member_field);
@@ -227,12 +294,10 @@ fn populate_directive_members(
     d.service = service;
 }
 
-/// Classify a parsed class by primary-decorator priority (`Component > Directive > Pipe > NgModule`)
-/// and assemble its [`ClassData`]. Weak decorators (`@Injectable`, `@Service`) nest inside the
-/// primary classification's data.
-///
-/// TODO(parity): ngtsc errors on colliding primary Angular decorators; we keep the highest-priority
-/// classification and drop the rest.
+/// Classify a parsed class by its primary decorator and assemble its [`ClassData`]. Weak
+/// decorators (`@Injectable`, `@Service`) nest inside the primary classification's data. A
+/// class with more than one primary decorator never gets here (`process_class` drops it with
+/// `DECORATOR_COLLISION`), so the `if` chain is a selection, not a priority.
 fn classify(reference_id: ReferenceId, parsed: ParsedClass, has_real_symbol: bool) -> ClassData {
     let ParsedClass {
         common,
@@ -289,6 +354,8 @@ fn classify(reference_id: ReferenceId, parsed: ParsedClass, has_real_symbol: boo
         class_name: common.class_name,
         constructor_params: common.constructor_params,
         unexpected_param_decorators: common.unexpected_param_decorators,
+        decorator_issues: common.decorator_issues,
+        di_issues: Vec::new(),
         member_decorators: common.member_decorators,
         later_declaration_references: common.later_declaration_references,
         top_level_references: common.top_level_references,
@@ -373,6 +440,7 @@ struct ParsedCommon {
     class_name: Option<String>,
     constructor_params: Option<Vec<ConstructorParamMetadata>>,
     unexpected_param_decorators: Vec<crate::analyzer::UnexpectedParamDecorator>,
+    decorator_issues: Vec<crate::analyzer::class_data::ValueIssue>,
     member_decorators: Vec<crate::DecoratedMemberMetadata>,
     later_declaration_references: Vec<oxc_span::Span>,
     top_level_references: Option<Vec<super::TopLevelReference>>,
@@ -413,6 +481,22 @@ struct ParsedClass {
     ng_module: Option<NgModuleData>,
 }
 
+impl ParsedClass {
+    /// How many of ngtsc's `HandlerPrecedence.PRIMARY` decorators (`@Component`, `@Directive`,
+    /// `@Pipe`, `@NgModule`) matched. `@Injectable` is WEAK and `@Service` SHARED.
+    fn primary_decorator_count(&self) -> usize {
+        [
+            self.component.is_some(),
+            self.directive.is_some(),
+            self.pipe.is_some(),
+            self.ng_module.is_some(),
+        ]
+        .into_iter()
+        .filter(|matched| *matched)
+        .count()
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn process_class_common<'a, Fs: ResourceResolverFs>(
     class: &Class<'a>,
@@ -427,6 +511,7 @@ fn process_class_common<'a, Fs: ResourceResolverFs>(
     local_exported_names: &HashSet<&'a str>,
     eval: &crate::evaluator::EvalInput<'a, '_>,
     enable_hmr: bool,
+    super_class: Option<crate::DeclarationTuple>,
 ) -> Option<ParsedClass> {
     let class_name = class.id.as_ref().map(|id| id.name.to_string());
     let name_span = class.id.as_ref().map(|id| id.span);
@@ -466,8 +551,16 @@ fn process_class_common<'a, Fs: ResourceResolverFs>(
     let mut pipe_facts: Option<PipeData> = None;
     let mut ng_module: Option<NgModuleData> = None;
     let mut ng_decorator_spans: Vec<oxc_span::Span> = Vec::new();
+    let mut decorator_issues = Vec::new();
 
     for decorator in &class.decorators {
+        if let Some(name) =
+            super::utils::get_canonical_decorator_name(decorator, semantic, angular_imports)
+        {
+            decorator_issues.extend(super::utils::class_decorator_argument_issue(
+                decorator, name,
+            ));
+        }
         if let Some(facts) = injectable::parse_decorator(decorator, semantic, angular_imports) {
             injectable = Some(facts);
             ng_decorator_spans.push(decorator.span);
@@ -498,13 +591,9 @@ fn process_class_common<'a, Fs: ResourceResolverFs>(
             pipe_facts = Some(facts);
             ng_decorator_spans.push(decorator.span);
         }
-        if let Some(facts) = super::ngmodule::parse_decorator(
-            decorator,
-            semantic,
-            import_map,
-            eval,
-            angular_imports,
-        ) {
+        if let Some(facts) =
+            super::ngmodule::parse_decorator(decorator, semantic, import_map, eval, angular_imports)
+        {
             ng_module = Some(facts);
             ng_decorator_spans.push(decorator.span);
         }
@@ -512,6 +601,20 @@ fn process_class_common<'a, Fs: ResourceResolverFs>(
 
     if ng_decorator_spans.is_empty() {
         return None;
+    }
+
+    if service.is_some() && !angular_imports.is_core {
+        let other_core_decorator = class.decorators.iter().find(|decorator| {
+            super::utils::is_angular_decorator(decorator, semantic, angular_imports)
+                && super::utils::get_canonical_decorator_name(decorator, semantic, angular_imports)
+                    != Some("Service")
+        });
+        if let Some(other) = other_core_decorator {
+            decorator_issues.push(ValueIssue::decorator_collision(
+                other.span,
+                "Cannot apply more than one Angular decorator on an @Service class.",
+            ));
+        }
     }
 
     // Class decorators lead the removal list, followed by the member decorators.
@@ -538,14 +641,16 @@ fn process_class_common<'a, Fs: ResourceResolverFs>(
         semantic,
     );
 
-    let member_io = input_output::extract_inputs_outputs(class, angular_imports, semantic, eval);
-    let mut fields = member_io.fields;
+    let mut member_io =
+        input_output::extract_inputs_outputs(class, angular_imports, semantic, eval);
+    let mut fields = std::mem::take(&mut member_io.fields);
     fields.extend(queries::extract_queries(
         class,
         angular_imports,
         semantic,
         eval,
         top_level_reads.as_mut(),
+        &mut member_io.issues,
     ));
     let (host_bindings, host_listeners) =
         host_binding::extract_host_bindings_listeners(class, eval, angular_imports);
@@ -563,10 +668,6 @@ fn process_class_common<'a, Fs: ResourceResolverFs>(
 
     let type_check_meta = extract_class_body_type_check_meta(class);
 
-    let super_class = class.heritage.as_ref().and_then(|heritage| {
-        let evaluated = crate::evaluator::evaluate_expression(&heritage.expression, eval);
-        super::imports::resolved_value_to_super_class(&evaluated)
-    });
     let uses_inheritance = class.heritage.is_some();
     let uses_on_changes = class.body.body.iter().any(|member| {
         if let ClassElement::MethodDefinition(method) = member {
@@ -608,6 +709,7 @@ fn process_class_common<'a, Fs: ResourceResolverFs>(
             class_name,
             constructor_params,
             unexpected_param_decorators,
+            decorator_issues,
             member_decorators,
             later_declaration_references,
             top_level_references: top_level_reads.map(|reads| reads.out),
@@ -639,6 +741,70 @@ fn process_class_common<'a, Fs: ResourceResolverFs>(
     })
 }
 
+/// The `extends` clause as a declaration to resolve, when it names a class.
+fn evaluate_super_class<'a>(
+    class: &Class<'a>,
+    eval: &crate::evaluator::EvalInput<'a, '_>,
+) -> Option<crate::DeclarationTuple> {
+    let heritage = class.heritage.as_ref()?;
+    let evaluated = crate::evaluator::evaluate_expression(&heritage.expression, eval);
+    super::imports::resolved_value_to_super_class(&evaluated)
+}
+
+/// Member decorators and lifecycle hooks by which ngtsc's directive handler recognizes an
+/// undecorated class as using Angular features (`findClassFieldWithAngularFeatures`).
+/// https://github.com/angular/angular/blob/e3ac727/packages/compiler-cli/src/ngtsc/annotations/directive/src/handler.ts#L100-L119
+const FIELD_DECORATORS: [&str; 8] = [
+    "Input",
+    "Output",
+    "ViewChild",
+    "ViewChildren",
+    "ContentChild",
+    "ContentChildren",
+    "HostBinding",
+    "HostListener",
+];
+const LIFECYCLE_HOOKS: [&str; 8] = [
+    "ngOnChanges",
+    "ngOnInit",
+    "ngOnDestroy",
+    "ngDoCheck",
+    "ngAfterViewInit",
+    "ngAfterViewChecked",
+    "ngAfterContentInit",
+    "ngAfterContentChecked",
+];
+
+/// https://github.com/angular/angular/blob/e3ac727/packages/compiler-cli/src/ngtsc/annotations/directive/src/handler.ts#L536-L554
+fn uses_angular_features<'a>(
+    class: &Class<'a>,
+    semantic: &Semantic<'a>,
+    angular_imports: &crate::analyzer::imports::AngularImports,
+) -> bool {
+    class.body.body.iter().any(|member| {
+        // Decorators on static members count too: ngtsc's `isStatic` guards only the hook arm.
+        let decorators = match member {
+            ClassElement::MethodDefinition(method) => {
+                if !method.r#static
+                    && method.kind == oxc_ast::ast::MethodDefinitionKind::Method
+                    && extract_property_key(&method.key)
+                        .is_some_and(|name| LIFECYCLE_HOOKS.contains(&name.as_ref()))
+                {
+                    return true;
+                }
+                &method.decorators
+            }
+            ClassElement::PropertyDefinition(prop) => &prop.decorators,
+            ClassElement::AccessorProperty(accessor) => &accessor.decorators,
+            _ => return false,
+        };
+        decorators.iter().any(|decorator| {
+            super::utils::get_canonical_decorator_name(decorator, semantic, angular_imports)
+                .is_some_and(|name| FIELD_DECORATORS.contains(&name))
+        })
+    })
+}
+
 /// Where the statement declaring `class` begins: the earliest of its first decorator (Angular or
 /// not), its `class` keyword, and an enclosing `export` / `export default` keyword.
 fn declaration_statement_start(
@@ -664,6 +830,8 @@ fn declaration_statement_start(
 pub struct ParsedFileAnalysis {
     pub classes: Vec<ClassData>,
     pub registrations: Vec<RegistrationInfo>,
+    /// Constructor facts for every class in the file, decorated or not.
+    pub di_facts: Vec<super::di_facts::ClassDiFacts>,
     pub file_exports: FileExportInfo,
     pub imports_end: u32,
     /// The file's static `import` declarations, in source order. Drives import removal for
@@ -692,6 +860,7 @@ pub struct ParsedFileAnalysis {
 struct ClassVisitorOutput {
     classes: Vec<ClassData>,
     registrations: Vec<RegistrationInfo>,
+    di_facts: Vec<super::di_facts::ClassDiFacts>,
     file_exports: FileExportInfo,
     diagnostics: Vec<crate::NgDiagnostic>,
 }
@@ -737,7 +906,14 @@ pub fn analyze_parsed<Fs: ResourceResolverFs>(
     }
 
     let file_exports = extract_file_exports(module_record);
-    let output = visitor.into_results(file_exports);
+    let mut output = visitor.into_results(file_exports);
+    for issue in super::initializer_api_usage::initializer_api_usage_issues(
+        semantic,
+        &angular_imports,
+        source_text,
+    ) {
+        super::class_data::push_issue(&mut output.diagnostics, path, converter, &issue);
+    }
 
     let import_declarations = super::imports::collect_import_declarations(
         program,
@@ -755,6 +931,7 @@ pub fn analyze_parsed<Fs: ResourceResolverFs>(
     ParsedFileAnalysis {
         classes: output.classes,
         registrations: output.registrations,
+        di_facts: output.di_facts,
         file_exports: output.file_exports,
         imports_end,
         import_declarations,
@@ -1421,14 +1598,12 @@ import { Component } from '@angular/core';
 @Component({
     selector: 'local-dir',
     template: '',
-    standalone: true,
 })
 class LocalDir {} // NOT exported
 
 @Component({
     selector: 'app-comp',
     template: '<local-dir></local-dir>',
-    standalone: true,
     imports: [LocalDir],
 })
 export class AppComp {}
@@ -1465,14 +1640,12 @@ import { Component } from '@angular/core';
 @Component({
     selector: 'local-dir',
     template: '',
-    standalone: true,
 })
 export class LocalDir {} // IS exported
 
 @Component({
     selector: 'app-comp',
     template: '<local-dir></local-dir>',
-    standalone: true,
     imports: [LocalDir],
 })
 export class AppComp {}
@@ -1506,7 +1679,6 @@ import { Component } from '@angular/core';
 @Component({
     selector: 'app-comp',
     template: '',
-    standalone: true,
 })
 export default class AppComp {}
 "#,
@@ -1537,7 +1709,7 @@ import { Component } from '@angular/core';
 @Component({
     selector: 'app-comp',
     template: '',
-    standalone: true,
+    
 })
 class AppComp {}
 
@@ -1641,7 +1813,6 @@ import { Directive } from '@angular/core';
 
 @Directive({
     selector: '[local-dir]',
-    standalone: true,
 })
 class LocalDir {} // NOT exported
 "#,
@@ -1671,7 +1842,6 @@ import { Pipe } from '@angular/core';
 
 @Pipe({
     name: 'local-pipe',
-    standalone: true,
 })
 class LocalPipe {} // NOT exported
 "#,
@@ -1990,7 +2160,6 @@ import {
 @NgComp({
     selector: 'my-comp',
     template: '<div></div>',
-    standalone: true,
     inputs: ['declaredInput'],
 })
 export class MyComponent {
@@ -2086,7 +2255,6 @@ import * as core from '@angular/core';
 @core.Component({
     selector: 'my-comp',
     template: '<div></div>',
-    standalone: true,
 })
 export class MyComponent {
     @core.Input() boundInput: string = '';
@@ -2148,7 +2316,6 @@ import { Input, Output, HostBinding, HostListener, Inject } from 'not-angular';
 @Component({
     selector: 'my-comp',
     template: '<div></div>',
-    standalone: true,
 })
 export class MyComponent {
     @Input() fakeInput: string = '';
@@ -3029,7 +3196,15 @@ export class MyService {
         ]);
 
         let results = run_analyzer(fs, "/test/tsconfig.json", false);
-        assert_eq!(diagnostics(&results), Vec::new());
+        assert_eq!(
+            diagnostics(&results),
+            vec![(
+                2028,
+                "@Service class cannot use constructor dependency injection. Use the `inject` \
+                 function instead."
+                    .to_string()
+            )]
+        );
     }
 
     #[test]

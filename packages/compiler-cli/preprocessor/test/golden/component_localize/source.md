@@ -18,7 +18,6 @@ import { Component } from '@angular/core';
     <div i18n>Hello World</div>
     <div i18n="site header|Header description@@customHeaderId">Welcome</div>
   `,
-  standalone: true,
 })
 export class LocalizeSimpleCmp {}
 
@@ -28,7 +27,6 @@ export class LocalizeSimpleCmp {}
     <div i18n="greeting|Greeting to user@@greetUser">Hello, {{ name }}!</div>
     <div i18n>You have {{ count }} new notifications.</div>
   `,
-  standalone: true,
 })
 export class LocalizeInterpolationCmp {
   name = 'Angular';
@@ -40,7 +38,19 @@ export class LocalizeInterpolationCmp {
   template: `
     <input i18n-title="input tooltip|Description for tooltip@@inputTitleId" title="Username input" />
   `,
-  standalone: true,
 })
 export class LocalizeAttributesCmp {}
+
+@Component({
+  selector: 'localize-named-placeholder-cmp',
+  template: `
+    <div i18n>
+      Named interpolation: {{ valueA // i18n(ph="PH_A") }} and {{ valueB // i18n(ph="PH B") }}
+    </div>
+  `,
+})
+export class LocalizeNamedPlaceholderCmp {
+  valueA = '';
+  valueB = '';
+}
 ```

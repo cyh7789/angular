@@ -51,6 +51,7 @@ pub struct QueryEngine<Fs: ResourceResolverFs + Clone + 'static> {
     pub generate_extra_imports_in_local_mode: bool,
     pub compile_non_exported_classes: bool,
     pub enable_hmr: bool,
+    pub strict_standalone: bool,
 }
 
 impl<Fs: ResourceResolverFs + Clone + 'static> QueryEngine<Fs> {
@@ -70,6 +71,7 @@ impl<Fs: ResourceResolverFs + Clone + 'static> QueryEngine<Fs> {
             false,
             true,
             false,
+            false,
         )
     }
 
@@ -83,6 +85,7 @@ impl<Fs: ResourceResolverFs + Clone + 'static> QueryEngine<Fs> {
         generate_extra_imports_in_local_mode: bool,
         compile_non_exported_classes: bool,
         enable_hmr: bool,
+        strict_standalone: bool,
     ) -> Arc<Self> {
         Arc::new(Self {
             fs,
@@ -97,6 +100,7 @@ impl<Fs: ResourceResolverFs + Clone + 'static> QueryEngine<Fs> {
             generate_extra_imports_in_local_mode,
             compile_non_exported_classes,
             enable_hmr,
+            strict_standalone,
         })
     }
 
@@ -117,6 +121,16 @@ impl<Fs: ResourceResolverFs + Clone + 'static> QueryEngine<Fs> {
 
     pub fn intern_path(&self, path: impl AsRef<Path>) -> FileId {
         self.interner.intern_path(path)
+    }
+
+    pub fn validation_context(
+        &self,
+        mode: crate::analyzer::WireMode,
+    ) -> crate::analyzer::ValidationContext {
+        crate::analyzer::ValidationContext {
+            mode,
+            strict_standalone: self.strict_standalone,
+        }
     }
 
     pub fn lookup_path(&self, id: FileId) -> PathBuf {
@@ -405,6 +419,7 @@ impl<Fs: ResourceResolverFs + Clone + 'static> QueryEngine<Fs> {
                 dynamic_dependencies: Vec::new(),
                 class_index: Arc::new(class_index),
                 symbol_index: Arc::new(symbol_index),
+                di_facts: Arc::new(crate::analyzer::di_facts::index_di_facts(result.di_facts)),
                 file_exports: Arc::new(result.exports),
                 errors: dep.errors.clone(),
                 diagnostics: Vec::new(),
@@ -467,6 +482,7 @@ impl<Fs: ResourceResolverFs + Clone + 'static> QueryEngine<Fs> {
             dynamic_dependencies,
             class_index: Arc::new(class_index),
             symbol_index: Arc::new(symbol_index),
+            di_facts: Arc::new(crate::analyzer::di_facts::index_di_facts(analysis.di_facts)),
             file_exports: Arc::new(analysis.file_exports),
             errors: dep.errors.clone(),
             diagnostics: analysis.diagnostics,
@@ -794,6 +810,13 @@ impl<Fs: ResourceResolverFs + Clone + 'static> QueryEngine<Fs> {
                 }
             }
 
+            let own_facts = class_name
+                .as_deref()
+                .and_then(|name| local_result.di_facts.get(name));
+            class.di_issues = class.inherited_ctor_issues(own_facts, ctx).await;
+            let provider_issues = class.undecorated_provider_issues(ctx).await;
+            class.di_issues.extend(provider_issues);
+
             if let Some(ref mut params) = class.constructor_params {
                 for param in params {
                     // Skip parameters already classified by the in-file pass; re-chasing is wrong:
@@ -865,7 +888,7 @@ impl<Fs: ResourceResolverFs + Clone + 'static> QueryEngine<Fs> {
             class.demote_resolved();
         }
 
-        local_result.validate();
+        local_result.validate(self.validation_context(crate::analyzer::WireMode::Semantic));
 
         Arc::new(local_result)
     }
@@ -1189,7 +1212,6 @@ mod tests {
                 import { ChildComponent } from './child.component';
                 @Component({
                     selector: 'app',
-                    standalone: true,
                     imports: [ChildComponent],
                     template: ''
                 })
@@ -1202,7 +1224,6 @@ mod tests {
                 import { Component } from '@angular/core';
                 @Component({
                     selector: 'child',
-                    standalone: true,
                     template: ''
                 })
                 export class ChildComponent {}
@@ -1252,7 +1273,6 @@ mod tests {
                 import { LeafComponent } from './middle.component';
                 @Component({
                     selector: 'root',
-                    standalone: true,
                     imports: [LeafComponent],
                     template: ''
                 })
@@ -1266,7 +1286,6 @@ mod tests {
                 export { LeafComponent } from './leaf.component';
                 @Component({
                     selector: 'middle',
-                    standalone: true,
                     template: ''
                 })
                 export class MiddleComponent {}
@@ -1278,7 +1297,6 @@ mod tests {
                 import { Component } from '@angular/core';
                 @Component({
                     selector: 'leaf',
-                    standalone: true,
                     template: ''
                 })
                 export class LeafComponent {}
@@ -1341,7 +1359,6 @@ mod tests {
                 import { SharedChildComponent } from './shared_child.component';
                 @Component({
                     selector: 'parent',
-                    standalone: true,
                     imports: [SharedChildComponent],
                     template: ''
                 })
@@ -1355,7 +1372,6 @@ mod tests {
                 import { SharedChildComponent } from './shared_child.component';
                 @Component({
                     selector: 'other-parent',
-                    standalone: true,
                     imports: [SharedChildComponent],
                     template: ''
                 })
@@ -1368,7 +1384,6 @@ mod tests {
                 import { Component } from '@angular/core';
                 @Component({
                     selector: 'independent',
-                    standalone: true,
                     template: ''
                 })
                 export class IndependentComponent {}
@@ -1380,7 +1395,6 @@ mod tests {
                 import { Component } from '@angular/core';
                 @Component({
                     selector: 'shared-child',
-                    standalone: true,
                     template: ''
                 })
                 export class SharedChildComponent {}
@@ -1461,7 +1475,6 @@ mod tests {
                     import {{ Comp{} }} from './comp_{}';
                     @Component({{
                         selector: 'comp-{}',
-                        standalone: true,
                         imports: [Comp{}],
                         template: ''
                     }})
@@ -1478,7 +1491,6 @@ mod tests {
                 import { Component } from '@angular/core';
                 @Component({
                     selector: 'comp-0',
-                    standalone: true,
                     template: ''
                 })
                 export class Comp0 {}
@@ -1558,7 +1570,6 @@ mod tests {
                 import { ChildComponent } from './child.component';
                 @Component({
                     selector: 'parent',
-                    standalone: true,
                     imports: [ChildComponent],
                     template: ''
                 })
@@ -1571,7 +1582,6 @@ mod tests {
                 import { Component } from '@angular/core';
                 @Component({
                     selector: 'child',
-                    standalone: true,
                     template: ''
                 })
                 export class ChildComponent {}
@@ -1662,7 +1672,6 @@ mod tests {
                 import { Component } from '@angular/core';
                 @Component({
                     selector: 'isolated-a',
-                    standalone: true,
                     template: ''
                 })
                 export class IsolatedAComponent {}
@@ -1674,7 +1683,6 @@ mod tests {
                 import { Component } from '@angular/core';
                 @Component({
                     selector: 'isolated-b',
-                    standalone: true,
                     template: ''
                 })
                 export class IsolatedBComponent {}

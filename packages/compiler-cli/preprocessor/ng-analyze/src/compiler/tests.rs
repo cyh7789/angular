@@ -1639,7 +1639,6 @@ fn test_ngmodule_array_spread_imports_resolution() {
             @Component({
                 selector: 'my-comp',
                 template: '<div>Test</div>',
-                standalone: true,
             })
             export class MyComponent {}
 
@@ -1736,7 +1735,6 @@ fn test_ngmodule_dts_tuple_typeof_array_spread() {
             @Component({
                 selector: 'my-comp',
                 template: '<div>Test</div>',
-                standalone: true,
             })
             export class MyComponent {}
 
@@ -1828,7 +1826,6 @@ fn test_component_dts_readonly_tuple_typeof_array_spread() {
             @Component({
                 selector: 'my-comp',
                 template: '<div dirA dirB>Test</div>',
-                standalone: true,
                 imports: [
                     ...READONLY_DEPS,
                 ],
@@ -1974,7 +1971,6 @@ fn test_unresolvable_selector_diagnostic() {
             @Component({
                 selector: DYNAMIC_SELECTOR,
                 template: '<div></div>',
-                standalone: true,
             })
             export class BadComponent {}
         "#
@@ -2015,7 +2011,6 @@ fn test_invalid_style_urls_diagnostic_ng2021() {
                 template: '<div></div>',
                 styleUrl: './single.css',
                 styleUrls: ['./multiple.css'],
-                standalone: true,
             })
             export class BadStylesComponent {}
         "#
@@ -2065,7 +2060,6 @@ fn test_missing_template_resource_diagnostic_ng2008() {
             @Component({
                 selector: 'app-missing-template',
                 templateUrl: './nonexistent.html',
-                standalone: true,
             })
             export class MissingTemplateComponent {}
         "#
@@ -2107,7 +2101,6 @@ fn test_missing_style_resource_diagnostic_ng2008() {
                 selector: 'app-missing-style',
                 template: '<div></div>',
                 styleUrl: './nonexistent.css',
-                standalone: true,
             })
             export class MissingStyleComponent {}
         "#
@@ -2337,7 +2330,6 @@ fn test_cross_file_selector_in_optimized_mode() {
             @Component({
                 selector: SELECTOR,
                 template: '<div></div>',
-                standalone: true,
             })
             export class CustomComponent {}
         "#
@@ -2381,7 +2373,6 @@ fn test_cross_file_selector_in_non_optimized_mode() {
             @Component({
                 selector: SELECTOR,
                 template: '<div></div>',
-                standalone: true,
             })
             export class CustomComponent {}
         "#
@@ -2660,7 +2651,6 @@ fn test_cross_file_invalid_selector_in_optimized_mode() {
             @Component({
                 selector: SELECTOR,
                 template: '<div></div>',
-                standalone: true,
             })
             export class BadCustomComponent {}
         "#
@@ -2735,6 +2725,18 @@ fn test_shadow_dom_selector_diagnostics_ng2009() {
         r#"{"files": ["no-hyphen.component.ts", "upper-case.component.ts", "attr-selector.component.ts"]}"#.to_string(),
     );
     virtual_files.insert(
+        "/project/node_modules/@angular/core/package.json".to_string(),
+        r#"{"name": "@angular/core", "types": "./index.d.ts"}"#.to_string(),
+    );
+    virtual_files.insert(
+        "/project/node_modules/@angular/core/index.d.ts".to_string(),
+        r#"
+            export declare enum ViewEncapsulation { Emulated = 0, None = 2, ShadowDom = 3 }
+            export declare const Component: any;
+        "#
+        .to_string(),
+    );
+    virtual_files.insert(
         "/project/no-hyphen.component.ts".to_string(),
         r#"
             import { Component, ViewEncapsulation } from '@angular/core';
@@ -2743,7 +2745,6 @@ fn test_shadow_dom_selector_diagnostics_ng2009() {
                 selector: 'widget',
                 template: '<div></div>',
                 encapsulation: ViewEncapsulation.ShadowDom,
-                standalone: true,
             })
             export class NoHyphenComponent {}
         "#
@@ -2758,7 +2759,6 @@ fn test_shadow_dom_selector_diagnostics_ng2009() {
                 selector: 'appWidget',
                 template: '<div></div>',
                 encapsulation: ViewEncapsulation.ShadowDom,
-                standalone: true,
             })
             export class UpperCaseComponent {}
         "#
@@ -2773,7 +2773,6 @@ fn test_shadow_dom_selector_diagnostics_ng2009() {
                 selector: 'widget[foo]',
                 template: '<div></div>',
                 encapsulation: ViewEncapsulation.ShadowDom,
-                standalone: true,
             })
             export class AttrSelectorComponent {}
         "#
@@ -2966,7 +2965,6 @@ fn test_dynamic_host_listener_args_diagnostic_ng1010() {
 
             @Directive({
                 selector: '[appBad]',
-                standalone: true,
             })
             export class BadDirective {
                 @HostListener('click', [getArg()])
@@ -3011,7 +3009,6 @@ fn test_non_array_host_listener_args_diagnostic_ng1010() {
 
             @Directive({
                 selector: '[appBad]',
-                standalone: true,
             })
             export class BadDirective {
                 @HostListener('click', 'notAnArray' as any)
@@ -3054,7 +3051,6 @@ fn test_missing_template_diagnostic_ng2001() {
 
             @Component({
                 selector: 'app-root',
-                standalone: true,
             })
             export class AppComponent {}
         "#
@@ -3096,7 +3092,6 @@ fn test_dynamic_template_diagnostic_ng1010() {
             @Component({
                 selector: 'app-root',
                 template: '<div>' + Math.random() + '</div>',
-                standalone: true,
             })
             export class AppComponent {}
         "#
@@ -3135,7 +3130,6 @@ fn test_dynamic_template_url_diagnostic_ng1010() {
             @Component({
                 selector: 'app-root',
                 templateUrl: './app-' + Math.random() + '.html',
-                standalone: true,
             })
             export class AppComponent {}
         "#
@@ -3175,7 +3169,6 @@ fn test_template_url_takes_precedence_over_dynamic_template() {
                 selector: 'app-root',
                 templateUrl: './app.component.html',
                 template: '<div>' + Math.random() + '</div>',
-                standalone: true,
             })
             export class AppComponent {}
         "#
@@ -3348,7 +3341,6 @@ fn test_template_url_from_same_file_constant_resolves() {
             @Component({
                 selector: 'app-root',
                 templateUrl: TEMPLATE_URL,
-                standalone: true,
             })
             export class AppComponent {}
         "#
@@ -3407,7 +3399,6 @@ fn test_foreign_imports_shape_diagnostics_ng1010() {
             @Component({
                 selector: 'app-root',
                 template: '<div></div>',
-                standalone: true,
                 foreignImports: [bad, two(A, B), obj.member(C), fn(x.y), ok(Kept)],
             })
             export class AppComponent {}
@@ -3469,7 +3460,6 @@ fn test_foreign_imports_non_array_diagnostic_ng1010() {
             @Component({
                 selector: 'app-root',
                 template: '<div></div>',
-                standalone: true,
                 foreignImports: SHARED_IMPORTS,
             })
             export class AppComponent {}
@@ -3512,7 +3502,6 @@ fn test_imports_on_non_standalone_component_ng2010() {
             @Component({
                 selector: 'app-other',
                 template: '<span></span>',
-                standalone: true,
             })
             export class OtherComponent {}
 
@@ -4107,7 +4096,6 @@ fn test_host_directives_resolved_declarations_cross_file_and_chained() {
         r#"
             import {Directive, Input} from '@angular/core';
             @Directive({
-                standalone: true,
             })
             export class HostDirC {
                 @Input() inputC: string = '';
@@ -4121,7 +4109,6 @@ fn test_host_directives_resolved_declarations_cross_file_and_chained() {
             import {Directive, Input} from '@angular/core';
             import {HostDirC} from './nested/host_c';
             @Directive({
-                standalone: true,
                 hostDirectives: [{
                     directive: HostDirC,
                     inputs: ['inputC: aliasC'],
@@ -4140,7 +4127,6 @@ fn test_host_directives_resolved_declarations_cross_file_and_chained() {
             import {HostDirB} from './host_b';
             @Directive({
                 selector: '[dirA]',
-                standalone: true,
                 hostDirectives: [{
                     directive: HostDirB,
                     inputs: ['inputB', 'aliasC: finalAliasC'],
@@ -4158,7 +4144,6 @@ fn test_host_directives_resolved_declarations_cross_file_and_chained() {
             @Component({
                 selector: 'app-cmp',
                 template: '<div dirA [inputB]="val" [finalAliasC]="val"></div>',
-                standalone: true,
                 imports: [DirA],
             })
             export class AppCmp {
@@ -4243,7 +4228,6 @@ fn test_host_directives_on_component_itself() {
         r#"
             import {Directive, Input} from '@angular/core';
             @Directive({
-                standalone: true,
             })
             export class HostDir {
                 @Input() hostInp: string = '';
@@ -4259,7 +4243,6 @@ fn test_host_directives_on_component_itself() {
             @Component({
                 selector: 'app-cmp',
                 template: '<div>Test</div>',
-                standalone: true,
                 hostDirectives: [{
                     directive: HostDir,
                     inputs: ['hostInp'],
@@ -4331,7 +4314,6 @@ fn test_host_directives_cycle_prevention() {
             import {DirB} from './dir_b';
             @Directive({
                 selector: '[dirA]',
-                standalone: true,
                 hostDirectives: [DirB],
             })
             export class DirA {}
@@ -4345,7 +4327,6 @@ fn test_host_directives_cycle_prevention() {
             import {DirA} from './dir_a';
             @Directive({
                 selector: '[dirB]',
-                standalone: true,
                 hostDirectives: [DirA],
             })
             export class DirB {}
@@ -4360,7 +4341,6 @@ fn test_host_directives_cycle_prevention() {
             @Component({
                 selector: 'app-cmp',
                 template: '<div dirA></div>',
-                standalone: true,
                 imports: [DirA],
             })
             export class AppCmp {}
@@ -4456,7 +4436,6 @@ fn test_inherited_input_and_output_same_name() {
             @Component({
                 selector: 'app-cmp',
                 template: '<child-ctrl></child-ctrl>',
-                standalone: true,
                 imports: [ChildControl],
             })
             export class AppCmp {}
@@ -4552,7 +4531,6 @@ fn test_inherited_model() {
             @Component({
                 selector: 'child-cmp',
                 template: '',
-                standalone: true,
             })
             export class ChildComponent extends BaseDirective {}
         "#
@@ -4566,7 +4544,6 @@ fn test_inherited_model() {
             @Component({
                 selector: 'app-cmp',
                 template: '<child-cmp></child-cmp>',
-                standalone: true,
                 imports: [ChildComponent],
             })
             export class AppCmp {}
@@ -4749,7 +4726,6 @@ const LIB_CONSUMER_APP: &str = r#"
     @Component({
         selector: 'app-cmp',
         template: '<div libOld libNew></div>',
-        standalone: true,
         imports: [LibDir],
     })
     export class AppCmp {}
@@ -5435,4 +5411,991 @@ fn test_same_file_ngmodule_after_component_only_marks_later_same_file_decls_forw
         is_fw("LateDir"),
         "later same-file declaration must be marked is_forward_ref"
     );
+}
+
+#[test]
+fn test_directive_metadata_shape_diagnostics() {
+    let cases: Vec<(&str, &str, u32, &str, &str)> = vec![
+        (
+            "/project/host-type.ts",
+            r#"
+            import { Directive } from '@angular/core';
+            @Directive({ selector: 'test-dir', host: 'invalid-host-type' })
+            export class TestDir {}
+            "#,
+            1010,
+            "Decorator host metadata must be an object\n  Value is of type 'string'.",
+            "'invalid-host-type'",
+        ),
+        (
+            "/project/host-value.ts",
+            r#"
+            import { Directive } from '@angular/core';
+            @Directive({ selector: 'test-dir', host: {'key': ['invalid-host-value']} })
+            export class TestDir {}
+            "#,
+            1010,
+            "Decorator host metadata must be a string -> string object, but found unparseable value\n  Value is of type '[string]'.",
+            "{'key': ['invalid-host-value']}",
+        ),
+        (
+            "/project/queries-type.ts",
+            r#"
+            import { Directive } from '@angular/core';
+            @Directive({ selector: 'test-dir', queries: 'invalid-queries-type' })
+            export class TestDir {}
+            "#,
+            1010,
+            "Decorator queries metadata must be an object literal",
+            "'invalid-queries-type'",
+        ),
+        (
+            "/project/queries-value.ts",
+            r#"
+            import { Directive, Input } from '@angular/core';
+            @Directive({ selector: 'test-dir', queries: { myViewQuery: new Input() } })
+            export class TestDir {}
+            "#,
+            1010,
+            "Decorator query metadata must be an instance of a query type",
+            "{ myViewQuery: new Input() }",
+        ),
+        (
+            "/project/predicate.ts",
+            r#"
+            import { Component, ContentChild } from '@angular/core';
+            @Component({ selector: 'test-cmp', template: '...' })
+            export class TestCmp {
+                @ContentChild({'invalid-predicate-type': true}) foo: any;
+            }
+            "#,
+            1010,
+            "@ContentChild predicate cannot be interpreted\n  Value is of type '{ 'invalid-predicate-type': boolean }'.",
+            "{'invalid-predicate-type': true}",
+        ),
+        (
+            "/project/host-binding-arity.ts",
+            r#"
+            import { Component, HostBinding } from '@angular/core';
+            @Component({ selector: 'test-cmp', template: '...' })
+            export class TestCmp {
+                @HostBinding('name', 'invalid-extra-arg') foo: any;
+            }
+            "#,
+            1002,
+            "@HostBinding can have at most one argument, got 2 argument(s)",
+            "@HostBinding('name', 'invalid-extra-arg')",
+        ),
+        (
+            "/project/ng-module-arg.ts",
+            r#"
+            import { NgModule } from '@angular/core';
+            @NgModule('invalidNgModuleArgumentType')
+            export class MyModule {}
+            "#,
+            1001,
+            "@NgModule argument must be an object literal",
+            "'invalidNgModuleArgumentType'",
+        ),
+        (
+            "/project/injectable-arg.ts",
+            r#"
+            import { Injectable } from '@angular/core';
+            @Injectable('invalid')
+            export class TestProvider {}
+            "#,
+            1001,
+            "@Injectable argument must be an object literal",
+            "'invalid'",
+        ),
+        (
+            "/project/injectable-bare.ts",
+            r#"
+            import { Injectable } from '@angular/core';
+            @Injectable
+            export class TestProvider {}
+            "#,
+            1003,
+            "@Injectable must be called",
+            "@Injectable",
+        ),
+        (
+            "/project/component-arity.ts",
+            r#"
+            import { Component as Cmp } from '@angular/core';
+            @Cmp({ selector: 'test-cmp', template: '...' }, {})
+            export class TestCmp {}
+            "#,
+            1002,
+            "Incorrect number of arguments to @Cmp decorator",
+            "@Cmp({ selector: 'test-cmp', template: '...' }, {})",
+        ),
+        (
+            "/project/pipe-arg.ts",
+            r#"
+            import { Pipe } from '@angular/core';
+            @Pipe(('name' as any))
+            export class TestPipe {}
+            "#,
+            1001,
+            "@Pipe must have a literal argument",
+            "'name'",
+        ),
+        (
+            "/project/pipe-bare.ts",
+            r#"
+            import { Pipe } from '@angular/core';
+            @Pipe
+            export class TestPipe {}
+            "#,
+            1003,
+            "@Pipe must be called",
+            "@Pipe",
+        ),
+        (
+            "/project/ng-module-bare.ts",
+            r#"
+            import { NgModule } from '@angular/core';
+            @NgModule
+            export class TestModule {}
+            "#,
+            1002,
+            "Incorrect number of arguments to @NgModule decorator",
+            "@NgModule",
+        ),
+        (
+            "/project/ng-module-arity.ts",
+            r#"
+            import { NgModule } from '@angular/core';
+            @NgModule({}, {})
+            export class TestModule {}
+            "#,
+            1002,
+            "Incorrect number of arguments to @NgModule decorator",
+            "@NgModule({}, {})",
+        ),
+        (
+            "/project/encapsulation.ts",
+            r#"
+            import { Component } from '@angular/core';
+            @Component({ selector: 'test-cmp', template: '...', encapsulation: 'invalid-value' })
+            export class TestCmp {}
+            "#,
+            1010,
+            "encapsulation must be a member of ViewEncapsulation enum from @angular/core\n  Value is of type 'string'.",
+            "'invalid-value'",
+        ),
+        (
+            "/project/change-detection.ts",
+            r#"
+            import { Component } from '@angular/core';
+            @Component({ selector: 'test-cmp', template: '...', changeDetection: 1 })
+            export class TestCmp {}
+            "#,
+            1010,
+            "changeDetection must be a member of ChangeDetectionStrategy enum from @angular/core\n  Value is of type 'number'.",
+            "1",
+        ),
+        (
+            "/project/two-primary.ts",
+            r#"
+            import { Component, Directive } from '@angular/core';
+            @Component({ selector: 'test', template: 'test' })
+            @Directive({ selector: 'test' })
+            export class ShouldNotCompile {}
+            "#,
+            1006,
+            "Two incompatible decorators on class",
+            "@Component({ selector: 'test', template: 'test' })\n            @Directive({ selector: 'test' })\n            export class ShouldNotCompile {}",
+        ),
+        (
+            "/project/service-collision.ts",
+            r#"
+            import { Service, Pipe } from '@angular/core';
+            @Service()
+            @Pipe({ name: 'foo' })
+            export class TestService {}
+            "#,
+            1006,
+            "Cannot apply more than one Angular decorator on an @Service class.",
+            "@Pipe({ name: 'foo' })",
+        ),
+        (
+            "/project/service-ctor.ts",
+            r#"
+            import { Service } from '@angular/core';
+            class Dep {}
+            @Service()
+            export class TestService {
+                constructor(dep: Dep) {}
+            }
+            "#,
+            2028,
+            "@Service class cannot use constructor dependency injection. Use the `inject` function instead.",
+            "TestService",
+        ),
+        (
+            "/project/service-bare.ts",
+            r#"
+            import { Service } from '@angular/core';
+            @Service
+            export class TestService {}
+            "#,
+            1003,
+            "@Service must be called",
+            "@Service",
+        ),
+        (
+            "/project/service-auto-provided.ts",
+            r#"
+            import { Service } from '@angular/core';
+            @Service({ autoProvided: 1 })
+            export class TestService {}
+            "#,
+            1010,
+            "`autoProvided` property must be a boolean literal",
+            "{ autoProvided: 1 }",
+        ),
+        (
+            "/project/bootstrap-standalone.ts",
+            r#"
+            import { Component, NgModule } from '@angular/core';
+            @Component({ selector: 'standalone-component', template: '...' })
+            class StandaloneComponent {}
+            @NgModule({ bootstrap: [StandaloneComponent] })
+            class BootstrapModule {}
+            "#,
+            6009,
+            "The `StandaloneComponent` class is a standalone component, which can not be used in the `@NgModule.bootstrap` array. Use the `bootstrapApplication` function for bootstrap instead.",
+            "[StandaloneComponent]",
+        ),
+        (
+            "/project/bootstrap-forward-ref.ts",
+            r#"
+            import { Component, NgModule, forwardRef } from '@angular/core';
+            @NgModule({ bootstrap: [forwardRef(() => StandaloneComponent)] })
+            class BootstrapModule {}
+            @Component({ selector: 'standalone-component', template: '...' })
+            class StandaloneComponent {}
+            "#,
+            6009,
+            "The `StandaloneComponent` class is a standalone component, which can not be used in the `@NgModule.bootstrap` array. Use the `bootstrapApplication` function for bootstrap instead.",
+            "[forwardRef(() => StandaloneComponent)]",
+        ),
+        (
+            "/project/declared-no-selector.ts",
+            r#"
+            import { Directive, NgModule } from '@angular/core';
+            @Directive({ standalone: false })
+            export class BaseDir {}
+            @NgModule({ declarations: [BaseDir] })
+            export class MyModule {}
+            "#,
+            2004,
+            "Directive BaseDir has no selector, please add it!",
+            "@Directive({ standalone: false })\n            export class BaseDir {}",
+        ),
+        (
+            "/project/input-decorator-on-signal.ts",
+            r#"
+            import { Directive, Input, input } from '@angular/core';
+            @Directive()
+            export class TestDir {
+                @Input() data = input('test');
+            }
+            "#,
+            1050,
+            "Using @Input with a signal input is not allowed.",
+            "@Input()",
+        ),
+        (
+            "/project/output-decorator-on-model.ts",
+            r#"
+            import { Directive, Output, model } from '@angular/core';
+            @Directive()
+            export class TestDir {
+                @Output() data = model(0);
+            }
+            "#,
+            1050,
+            "Using @Output with a model input is not allowed.",
+            "@Output()",
+        ),
+        (
+            "/project/output-decorator-on-output.ts",
+            r#"
+            import { Directive, Output, output } from '@angular/core';
+            @Directive()
+            export class TestDir {
+                @Output() click = output();
+            }
+            "#,
+            1050,
+            "Using \"@Output\" with \"output()\" is not allowed.",
+            "@Output()",
+        ),
+        (
+            "/project/signal-input-in-inputs.ts",
+            r#"
+            import { Directive, input } from '@angular/core';
+            @Directive({ inputs: ['data'] })
+            export class TestDir {
+                data = input('test');
+            }
+            "#,
+            1051,
+            "Input \"data\" is also declared as non-signal in @Directive.",
+            "data = input('test');",
+        ),
+        (
+            "/project/output-in-outputs.ts",
+            r#"
+            import { Component, output } from '@angular/core';
+            @Component({ selector: 'test', template: '', outputs: ['click'] })
+            export class TestCmp {
+                click = output();
+            }
+            "#,
+            1051,
+            "Output \"click\" is unexpectedly declared in @Component as well.",
+            "click = output();",
+        ),
+        (
+            "/project/output-required.ts",
+            r#"
+            import { Directive, output } from '@angular/core';
+            @Directive()
+            export class TestDir {
+                click = output.required();
+            }
+            "#,
+            1052,
+            "Output does not support \".required()\".",
+            "output.required()",
+        ),
+        (
+            "/project/private-input.ts",
+            r#"
+            import { Directive, input } from '@angular/core';
+            @Directive({ selector: '[dir]' })
+            export class TestDir {
+                private data = input.required<boolean>();
+            }
+            "#,
+            1053,
+            "Cannot use \"input\" on a class member that is declared as private.\n  Update the class field to be either: public, public readonly, protected",
+            "input.required<boolean>()",
+        ),
+        (
+            "/project/es-private-query.ts",
+            r#"
+            import { Directive, viewChild } from '@angular/core';
+            @Directive({ selector: '[dir]' })
+            export class TestDir {
+                #el = viewChild('myLocator');
+            }
+            "#,
+            1053,
+            "Cannot use \"viewChild\" on a class member that is declared as ES private.\n  Update the class field to be either: public, public readonly, protected, private",
+            "viewChild('myLocator')",
+        ),
+        (
+            "/project/query-decorator-on-signal.ts",
+            r#"
+            import { Component, viewChild, ViewChild } from '@angular/core';
+            @Component({ selector: 'test', template: '' })
+            export class TestCmp {
+                @ViewChild('myLocator') el = viewChild('myLocator');
+            }
+            "#,
+            1050,
+            "Using @ViewChild with a signal-based query is not allowed.",
+            "@ViewChild('myLocator')",
+        ),
+        (
+            "/project/static-signal-query.ts",
+            r#"
+            import { Component, viewChild } from '@angular/core';
+            @Component({ selector: 'test', template: '' })
+            export class TestCmp {
+                static el = viewChild('myLocator');
+            }
+            "#,
+            1100,
+            "Query is incorrectly declared on a static class member.",
+            "viewChild('myLocator')",
+        ),
+        (
+            "/project/signal-query-in-queries.ts",
+            r#"
+            import { Directive, ViewChild, viewChild } from '@angular/core';
+            @Directive({ selector: 'test', queries: { el: new ViewChild('myLocator') } })
+            export class TestDir {
+                el = viewChild('myLocator');
+            }
+            "#,
+            1051,
+            "Query is declared multiple times. \"@Directive\" declares a query for the same property.",
+            "new ViewChild('myLocator')",
+        ),
+        (
+            "/project/complex-read.ts",
+            r#"
+            import { Directive, viewChild } from '@angular/core';
+            @Directive({ selector: 'test' })
+            export class TestDir {
+                something = null!;
+                el = viewChild('myLocator', { read: this.something });
+            }
+            "#,
+            1011,
+            "Query \"read\" option expected a literal class reference.",
+            "this.something",
+        ),
+        (
+            "/project/no-locator.ts",
+            r#"
+            import { Directive, viewChild } from '@angular/core';
+            @Directive({ selector: 'test' })
+            export class TestDir {
+                el = viewChild();
+            }
+            "#,
+            1010,
+            "No locator specified.",
+            "viewChild()",
+        ),
+        (
+            "/project/query-options-spread.ts",
+            r#"
+            import { Component, ViewChild } from '@angular/core';
+            declare const opts: any;
+            @Component({ selector: 'test-cmp', template: '' })
+            export class TestCmp {
+                @ViewChild('foo', ...opts) el: any;
+            }
+            "#,
+            1001,
+            "@ViewChild options must be an object literal",
+            "...opts",
+        ),
+        (
+            "/project/signal-input-options-spread.ts",
+            r#"
+            import { Directive, input } from '@angular/core';
+            declare const opts: any;
+            @Directive({ selector: 'test' })
+            export class TestDir {
+                val = input(0, ...opts);
+            }
+            "#,
+            1010,
+            "Argument needs to be an object literal that is statically analyzable.",
+            "...opts",
+        ),
+    ];
+
+    let mut virtual_files: HashMap<String, String> = cases
+        .iter()
+        .map(|(path, source, ..)| (path.to_string(), source.to_string()))
+        .collect();
+    let files: Vec<String> = cases
+        .iter()
+        .map(|(path, ..)| format!("\"{}\"", path.trim_start_matches("/project/")))
+        .collect();
+    virtual_files.insert(
+        "/project/tsconfig.json".to_string(),
+        format!(r#"{{"files": [{}]}}"#, files.join(", ")),
+    );
+    let analyzer = Analyzer::new(AnalyzerOptions {
+        tsconfig_path: "/project/tsconfig.json".to_string(),
+        optimize: Some(true),
+        virtual_files: Some(virtual_files.clone()),
+        ..Default::default()
+    })
+    .unwrap();
+
+    for (path, source, code, message, node_text) in cases {
+        let meta = analyzer
+            .get_metadata_for_file(path.to_string())
+            .unwrap_or_else(|| panic!("{path} metadata"));
+        assert_eq!(meta.diagnostics.len(), 1, "{path}: {:?}", meta.diagnostics);
+        let diag = &meta.diagnostics[0];
+        assert_eq!(diag.code, code, "{path}");
+        assert_eq!(diag.message_text, message, "{path}");
+        let span = diag.span.as_ref().expect("diagnostic span");
+        assert_eq!(
+            &source[span.start as usize..span.end as usize],
+            node_text,
+            "{path}"
+        );
+    }
+}
+
+#[test]
+fn test_strict_standalone_diagnostics() {
+    let source = r#"
+        import { Component, Directive, Pipe } from '@angular/core';
+        @Component({ selector: 'legacy-cmp', standalone: false, template: '' })
+        export class LegacyCmp {}
+        @Directive({ selector: '[legacy]', standalone: false })
+        export class LegacyDir {}
+        @Pipe({ name: 'legacy', standalone: false })
+        export class LegacyPipe {}
+        @Directive()
+        export class ModernDir {}
+    "#;
+    let analyzer_for = |strict_standalone: bool, optimize: bool| {
+        let mut virtual_files = HashMap::new();
+        virtual_files.insert("/project/app.ts".to_string(), source.to_string());
+        virtual_files.insert(
+            "/project/tsconfig.json".to_string(),
+            format!(
+                r#"{{"files": ["app.ts"], "angularCompilerOptions": {{"strictStandalone": {strict_standalone}}}}}"#
+            ),
+        );
+        Analyzer::new(AnalyzerOptions {
+            tsconfig_path: "/project/tsconfig.json".to_string(),
+            optimize: Some(optimize),
+            virtual_files: Some(virtual_files),
+            ..Default::default()
+        })
+        .unwrap()
+    };
+
+    let analyzer = analyzer_for(false, true);
+    let meta = analyzer
+        .get_metadata_for_file("/project/app.ts".to_string())
+        .expect("app.ts metadata");
+    assert!(meta.diagnostics.is_empty(), "{:?}", meta.diagnostics);
+
+    for optimize in [true, false] {
+        let analyzer = analyzer_for(true, optimize);
+        let meta = if optimize {
+            analyzer
+                .get_metadata_for_file("/project/app.ts".to_string())
+                .expect("app.ts metadata")
+        } else {
+            let iterator = analyzer.analyze().unwrap();
+            let chunk = futures::executor::block_on(iterator.next())
+                .unwrap()
+                .expect("one chunk");
+            chunk.files.into_iter().next().expect("app.ts result")
+        };
+        let found: Vec<(u32, &str, &str)> = meta
+            .diagnostics
+            .iter()
+            .map(|diag| {
+                let span = diag.span.as_ref().expect("diagnostic span");
+                (
+                    diag.code,
+                    diag.message_text.as_str(),
+                    &source[span.start as usize..span.end as usize],
+                )
+            })
+            .collect();
+        let directives = "Only standalone components/directives are allowed when \
+                          'strictStandalone' is enabled.";
+        assert_eq!(
+            found,
+            vec![
+                (2023, directives, "false"),
+                (2023, directives, "false"),
+                (
+                    2023,
+                    "Only standalone pipes are allowed when 'strictStandalone' is enabled.",
+                    "false"
+                ),
+            ],
+            "optimize={optimize}"
+        );
+    }
+}
+
+#[test]
+fn test_dependency_injection_diagnostics() {
+    let files: Vec<(&str, &str)> = vec![
+        (
+            "/project/local.ts",
+            r#"
+            import { Directive, ElementRef } from '@angular/core';
+            export class BasePlain {}
+            export class BasePlainWithBlankConstructor {
+                constructor() {}
+            }
+            export class BasePlainWithConstructorParameters {
+                constructor(elementRef: ElementRef) {}
+            }
+            @Directive({ selector: '[base]' })
+            export class BaseDir {
+                constructor(elementRef: ElementRef) {}
+            }
+            "#,
+        ),
+        (
+            "/project/lib.d.ts",
+            r#"
+            import { ɵɵDirectiveDeclaration, ɵɵFactoryDeclaration, ElementRef } from '@angular/core';
+            export declare class DtsPlainWithConstructorParameters {
+                constructor(elementRef: ElementRef);
+            }
+            export declare class DtsDir {
+                constructor(elementRef: ElementRef);
+                static ɵdir: ɵɵDirectiveDeclaration<DtsDir, '[base]', never, never, never, never>;
+            }
+            export declare class DtsInjectable {
+                constructor(elementRef: ElementRef);
+                static ɵfac: ɵɵFactoryDeclaration<DtsInjectable, never>;
+            }
+            "#,
+        ),
+        (
+            "/project/inherited.ts",
+            r#"
+            import { Component, Directive, Injectable, Service } from '@angular/core';
+            import { BasePlain, BasePlainWithBlankConstructor, BasePlainWithConstructorParameters, BaseDir } from './local';
+            import { DtsPlainWithConstructorParameters, DtsDir, DtsInjectable } from './lib';
+
+            class Parent extends BasePlainWithConstructorParameters {}
+            class GrandParent extends Parent {}
+
+            @Directive({ selector: '[a]' })
+            export class DirFromPlain extends BasePlain {}
+            @Directive({ selector: '[b]' })
+            export class DirFromBlankCtor extends BasePlainWithBlankConstructor {}
+            @Directive({ selector: '[c]' })
+            export class DirFromDecorated extends BaseDir {}
+            @Directive({ selector: '[d]' })
+            export class DirFromParams extends BasePlainWithConstructorParameters {}
+            @Component({ selector: 'e', template: '' })
+            export class CmpFromGrandParent extends GrandParent {}
+            @Directive({ selector: '[f]' })
+            export class DirWithOwnCtor extends BasePlainWithConstructorParameters {
+                constructor() { super(null!); }
+            }
+            @Directive({ selector: '[g]' })
+            export class DirFromDts extends DtsPlainWithConstructorParameters {}
+            @Directive({ selector: '[h]' })
+            export class DirFromDtsDir extends DtsDir {}
+            @Directive({ selector: '[i]' })
+            export class DirFromDtsInjectable extends DtsInjectable {}
+            @Injectable()
+            export class ServiceFromParams extends BasePlainWithConstructorParameters {}
+            @Injectable({ providedIn: 'root', useFactory: () => null })
+            export class FactoryServiceFromParams extends BasePlainWithConstructorParameters {}
+            @Service()
+            export class ModernServiceFromParams extends BasePlainWithConstructorParameters {}
+            @Service()
+            export class ModernServiceFromDecorated extends BaseDir {}
+            "#,
+        ),
+        (
+            "/project/providers.ts",
+            r#"
+            import { Component, Directive, Injectable, NgModule, NgZone, Pipe } from '@angular/core';
+            import { DtsPlainWithConstructorParameters } from './lib';
+
+            @Injectable({ providedIn: 'root' })
+            class Service {}
+            class NotAService {
+                constructor(ngZone: NgZone) {}
+            }
+            class TrivialClass {}
+            @Pipe({ name: 'p', standalone: false })
+            class SomePipe {}
+            @NgModule({})
+            class ProvidedModule {
+                constructor(dep: Service) {}
+            }
+
+            @NgModule({
+                providers: [
+                    NotAService,
+                    {provide: Service, useClass: NotAService},
+                    {provide: Service, useClass: NotAService, deps: [NgZone]},
+                    [Service, [NotAService]],
+                    TrivialClass,
+                    SomePipe,
+                    ProvidedModule,
+                    DtsPlainWithConstructorParameters,
+                ],
+            })
+            export class SomeModule {}
+
+            @Directive({ selector: '[dir]', providers: [NotAService] })
+            export class SomeDirective {}
+
+            @Component({ selector: 'cmp', template: '', viewProviders: [NotAService] })
+            export class SomeComponent {}
+            "#,
+        ),
+        (
+            "/project/undecorated.ts",
+            r#"
+            import { Input, HostListener, Injectable } from '@angular/core';
+            export class WithInput {
+                @Input() someMember: any;
+            }
+            export class WithHook {
+                ngOnInit() {}
+            }
+            export class WithStaticHook {
+                static ngOnInit() {}
+            }
+            function custom(): any {}
+            @custom
+            export class CustomDecorated {
+                ngOnDestroy() {}
+            }
+            export class Plain {
+                @HostListener('click') onClick() {}
+            }
+            export default class {
+                ngOnInit() {}
+            }
+            "#,
+        ),
+    ];
+
+    let mut virtual_files: HashMap<String, String> = files
+        .iter()
+        .map(|(path, source)| (path.to_string(), source.to_string()))
+        .collect();
+    virtual_files.insert(
+        "/project/tsconfig.json".to_string(),
+        r#"{"files": ["inherited.ts", "providers.ts", "undecorated.ts"]}"#.to_string(),
+    );
+    let analyzer = Analyzer::new(AnalyzerOptions {
+        tsconfig_path: "/project/tsconfig.json".to_string(),
+        optimize: Some(true),
+        virtual_files: Some(virtual_files),
+        ..Default::default()
+    })
+    .unwrap();
+
+    let diagnostics_of = |path: &str| -> Vec<(u32, String, String)> {
+        let source = files.iter().find(|(p, _)| *p == path).unwrap().1;
+        let meta = analyzer
+            .get_metadata_for_file(path.to_string())
+            .unwrap_or_else(|| panic!("{path} metadata"));
+        meta.diagnostics
+            .iter()
+            .map(|diag| {
+                let span = diag.span.as_ref().expect("diagnostic span");
+                (
+                    diag.code,
+                    diag.message_text.clone(),
+                    source[span.start as usize..span.end as usize].to_string(),
+                )
+            })
+            .collect()
+    };
+
+    let inherits = |kind: &str, class: &str, base: &str| {
+        let decorator = if kind == "injectable" {
+            "Injectable"
+        } else {
+            "Directive"
+        };
+        format!(
+            "The {kind} {class} inherits its constructor from {base}, but the latter does not \
+             have an Angular decorator of its own. Dependency injection will not be able to \
+             resolve the parameters of {base}'s constructor. Either add a @{decorator} decorator \
+             to {base}, or add an explicit constructor to {class}."
+        )
+    };
+    let service_di = "@Service class cannot use constructor dependency injection. Use the \
+                      `inject` function instead."
+        .to_string();
+    assert_eq!(
+        diagnostics_of("/project/inherited.ts"),
+        vec![
+            (
+                2006,
+                inherits(
+                    "directive",
+                    "DirFromParams",
+                    "BasePlainWithConstructorParameters"
+                ),
+                "DirFromParams".to_string()
+            ),
+            (
+                2006,
+                inherits(
+                    "component",
+                    "CmpFromGrandParent",
+                    "BasePlainWithConstructorParameters"
+                ),
+                "CmpFromGrandParent".to_string()
+            ),
+            (
+                2006,
+                inherits(
+                    "directive",
+                    "DirFromDts",
+                    "DtsPlainWithConstructorParameters"
+                ),
+                "DirFromDts".to_string()
+            ),
+            // ngtsc only knows a `.d.ts` class as injectable through `ɵprov`/`ɵfac`.
+            (
+                2006,
+                inherits("directive", "DirFromDtsDir", "DtsDir"),
+                "DirFromDtsDir".to_string()
+            ),
+            (
+                2006,
+                inherits(
+                    "injectable",
+                    "ServiceFromParams",
+                    "BasePlainWithConstructorParameters"
+                ),
+                "ServiceFromParams".to_string()
+            ),
+            (
+                2028,
+                service_di.clone(),
+                "ModernServiceFromParams".to_string()
+            ),
+            (2028, service_di, "ModernServiceFromDecorated".to_string()),
+        ]
+    );
+
+    let undecorated_provider = "The class 'NotAService' cannot be created via dependency \
+                                injection, as it does not have an Angular decorator. This will \
+                                result in an error at runtime.\n\nEither add the @Injectable() \
+                                decorator to 'NotAService', or configure a different provider \
+                                (such as a provider with 'useFactory').\n"
+        .to_string();
+    assert_eq!(
+        diagnostics_of("/project/providers.ts"),
+        vec![
+            (
+                2005,
+                undecorated_provider.clone(),
+                "NotAService".to_string()
+            ),
+            (
+                2005,
+                undecorated_provider.clone(),
+                "NotAService".to_string()
+            ),
+            (
+                2005,
+                undecorated_provider.clone(),
+                "NotAService".to_string()
+            ),
+            (
+                2005,
+                undecorated_provider.clone(),
+                "NotAService".to_string()
+            ),
+            (2005, undecorated_provider, "NotAService".to_string()),
+        ]
+    );
+
+    let undecorated_class = "Class is using Angular features but is not decorated. Please add an \
+                             explicit Angular decorator."
+        .to_string();
+    assert_eq!(
+        diagnostics_of("/project/undecorated.ts"),
+        vec![
+            (2007, undecorated_class.clone(), "WithInput".to_string()),
+            (2007, undecorated_class.clone(), "WithHook".to_string()),
+            (2007, undecorated_class.clone(), "Plain".to_string()),
+            (
+                2007,
+                undecorated_class,
+                "class {\n                ngOnInit() {}\n            }".to_string(),
+            ),
+        ]
+    );
+}
+
+#[test]
+fn test_instance_io_not_clobbered_by_same_named_static_member() {
+    let mut virtual_files = HashMap::new();
+    virtual_files.insert(
+        "/project/remote.ts".to_string(),
+        "export const REMOTE_OPTS = { alias: 'staticAlias', required: true };".to_string(),
+    );
+    virtual_files.insert(
+        "/project/app.ts".to_string(),
+        r#"
+        import { Directive, Input, Output, input, output } from '@angular/core';
+        import { REMOTE_OPTS } from './remote';
+        @Directive({ selector: '[dir]', inputs: ['metaInput'] })
+        export class Dir {
+            static readonly metaInput = 1;
+            metaInput = 2;
+
+            @Input() foo = 1;
+            static foo = 2;
+
+            @Output() bar: any;
+            static bar() {}
+
+            @Input(REMOTE_OPTS) static baz = 'unrelated';
+            baz = input(1);
+
+            qux = output();
+            static qux = 'unrelated';
+        }
+        "#
+        .to_string(),
+    );
+    virtual_files.insert(
+        "/project/tsconfig.json".to_string(),
+        r#"{"files": ["app.ts", "remote.ts"]}"#.to_string(),
+    );
+
+    let analyzer = Analyzer::new(AnalyzerOptions {
+        tsconfig_path: "/project/tsconfig.json".to_string(),
+        optimize: Some(true),
+        virtual_files: Some(virtual_files),
+        ..Default::default()
+    })
+    .unwrap();
+
+    let meta = analyzer
+        .get_metadata_for_file("/project/app.ts".to_string())
+        .unwrap();
+
+    // Only the static @Input on `static baz` should be rejected (NG1100).
+    let diag_codes: Vec<u32> = meta.diagnostics.iter().map(|d| d.code).collect();
+    assert_eq!(
+        diag_codes,
+        vec![1100],
+        "unexpected diagnostics: {:?}",
+        meta.diagnostics
+    );
+
+    assert_eq!(meta.classes.len(), 1);
+    let inputs: Vec<(&str, Option<&str>, bool, bool)> = meta.classes[0]
+        .inputs
+        .iter()
+        .map(|i| {
+            (
+                i.name.as_str(),
+                i.alias.as_deref(),
+                i.required,
+                i.is_restricted,
+            )
+        })
+        .collect();
+    assert_eq!(
+        inputs,
+        vec![
+            ("metaInput", None, false, false),
+            ("foo", None, false, false),
+            ("baz", None, false, false),
+        ]
+    );
+
+    let outputs: Vec<&str> = meta.classes[0]
+        .outputs
+        .iter()
+        .map(|o| o.name.as_str())
+        .collect();
+    assert_eq!(outputs, vec!["bar", "qux"]);
 }
