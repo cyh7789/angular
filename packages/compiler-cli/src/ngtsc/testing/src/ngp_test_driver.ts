@@ -28,6 +28,8 @@ import {
 } from '../../../../preprocessor/api';
 import {createRequire} from 'node:module';
 import {exitCodeFromResult} from '../../../perform_compile';
+import {verifySupportedTypeScriptVersion} from '../../../typescript_support';
+import {CompilerOptions, CustomTransformers, UNKNOWN_ERROR_CODE} from '../../../transformers/api';
 import {ErrorCode, ngErrorCode} from '../../diagnostics';
 import {AbsoluteFsPath, FileSystem} from '../../file_system';
 import {ClassDeclaration, DeclarationNode} from '../../reflection';
@@ -36,10 +38,17 @@ import {hasIgnoreForDiagnosticsMarker, readSpanComment} from '../../typecheck/sr
 import {shouldReportDiagnostic} from '../../typecheck/src/diagnostics';
 import {isInHostBindingTcb} from '../../typecheck/src/tcb_util';
 import {getTokenAtPosition} from '../../util/src/typescript';
-import type * as api from '../../../transformers/api';
 import {NgtscTestCompilerHost} from './compiler_host';
 
 const SPAN_COMMENT_REGEX = /\/\*(\d+),(\d+)\*\//g;
+
+/**
+ * Workspace name under which ngtsc's test `FileNameToModuleNameHost` (`test/ngtsc/env.ts`) names
+ * modules when `_useHostForImportGeneration` is set, and the specifier prefix it strips again on
+ * resolution.
+ */
+const ROOT_HOST_WORKSPACE_NAME = 'root';
+const ROOT_HOST_PREFIX = `${ROOT_HOST_WORKSPACE_NAME}/`;
 
 /**
  * Returns true if the current test run is configured to use the NGP compiler backend.
@@ -119,6 +128,9 @@ function createTestWasmAnalyzerSync(
       nodeModulesPathOverride: options.nodeModulesPathOverride,
       workspaceName: options.workspaceName,
       rootDirs: options.rootDirs,
+      enableHmr: options.enableHmr,
+      usePoisonedData: options.usePoisonedData,
+      useHostForImportGeneration: options.useHostForImportGeneration,
     }),
     options.hostFs,
   );
@@ -242,10 +254,10 @@ export function performNgpCompilationSync(params: {
   basePath: AbsoluteFsPath;
   tsconfigPath: AbsoluteFsPath;
   rootNames: readonly string[];
-  options: api.CompilerOptions;
+  options: CompilerOptions;
   emit: boolean;
   complianceMode?: boolean;
-  customTransformers?: api.CustomTransformers;
+  customTransformers?: CustomTransformers;
   writeFileCallback?: ts.WriteFileCallback;
   closeAnalyzer?: boolean;
   tcbConfigOverride?: Partial<NgpTypeCheckingConfig>;
@@ -283,6 +295,12 @@ export function performNgpCompilationSync(params: {
     Boolean(rawOpts['_experimentalAllowEmitDeclarationOnly']);
   const workspaceName = rawOpts['workspaceName'] as string | undefined;
   const rootDirs = options.rootDirs?.map((d: string) => toPosixPath(fs.resolve(basePath, d)));
+  const useHostForImportGeneration = Boolean(
+    rawOpts['_useHostForImportGeneration'] || rawOpts['_useHostForImportAndAliasGeneration'],
+  );
+  const emulateRootHost = useHostForImportGeneration && workspaceName === undefined;
+  const analyzerWorkspaceName = emulateRootHost ? ROOT_HOST_WORKSPACE_NAME : workspaceName;
+  const analyzerRootDirs = emulateRootHost ? [toPosixPath(fs.pwd())] : rootDirs;
 
   // If tsconfig.json does not exist or does not explicitly specify `files` or `include`,
   // inject `files` from TypeScript's resolved `rootNames` via `virtualFiles` so `WasmAnalyzer`
@@ -308,22 +326,12 @@ export function performNgpCompilationSync(params: {
       angularCompilerOptions: {
         _generateExtraImportsInLocalMode: Boolean(rawOpts['_generateExtraImportsInLocalMode']),
         compileNonExportedClasses: rawOpts['compileNonExportedClasses'] !== false,
-        workspaceName,
+        workspaceName: analyzerWorkspaceName,
+        _useHostForImportGeneration: useHostForImportGeneration,
       },
       files: rootNames.map((r) => toPosixPath(fs.resolve(basePath, r))),
     });
   }
-
-  const analyzer = createTestWasmAnalyzerSync(posixTsconfigPath, {
-    backend: 'wasm',
-    wasmBinding,
-    hostFs,
-    optimize,
-    virtualFiles,
-    nodeModulesPathOverride: toPosixPath(fs.resolve('/node_modules')),
-    workspaceName,
-    rootDirs,
-  });
 
   const tcbConfig: NgpTypeCheckingConfig = {
     ...buildTypeCheckingConfig({
@@ -336,6 +344,20 @@ export function performNgpCompilationSync(params: {
     ...tcbConfigOverride,
   };
 
+  const analyzer = createTestWasmAnalyzerSync(posixTsconfigPath, {
+    backend: 'wasm',
+    wasmBinding,
+    hostFs,
+    optimize,
+    virtualFiles,
+    nodeModulesPathOverride: toPosixPath(fs.resolve('/node_modules')),
+    workspaceName: analyzerWorkspaceName,
+    rootDirs: analyzerRootDirs,
+    enableHmr: Boolean(rawOpts['_enableHmr']),
+    usePoisonedData: tcbConfig.usePoisonedData,
+    useHostForImportGeneration,
+  });
+
   let compiler: HybridCompiler;
   try {
     compiler = new HybridCompiler(analyzer, {
@@ -347,6 +369,7 @@ export function performNgpCompilationSync(params: {
         enableI18nLegacyMessageIdFormat: options.enableI18nLegacyMessageIdFormat,
         i18nNormalizeLineEndingsInICUs: options.i18nNormalizeLineEndingsInICUs,
         preserveWhitespaces: options.preserveWhitespaces,
+        preserveSignificantWhitespace: options.i18nPreserveWhitespaceForLegacyExtraction ?? true,
         enableSelectorless: Boolean(rawOpts['_enableSelectorless']),
       },
       legacyOptionalChaining: Boolean(rawOpts['legacyOptionalChaining']),
@@ -365,6 +388,7 @@ export function performNgpCompilationSync(params: {
       enableI18nLegacyMessageIdFormat: options.enableI18nLegacyMessageIdFormat,
       i18nUseExternalIds: options.i18nUseExternalIds,
       i18nNormalizeLineEndingsInICUs: options.i18nNormalizeLineEndingsInICUs,
+      i18nPreserveWhitespaceForLegacyExtraction: options.i18nPreserveWhitespaceForLegacyExtraction,
       enableHmr: Boolean(rawOpts['_enableHmr']),
       rootDir: options.rootDir
         ? toPosixPath(fs.resolve(basePath, options.rootDir))
@@ -554,6 +578,29 @@ export function performNgpCompilationSync(params: {
     overlayHost.writeFile = writeFileCallback;
   }
 
+  if (emulateRootHost) {
+    overlayHost.resolveModuleNames = (
+      moduleNames: string[],
+      containingFile: string,
+      _reusedNames: string[] | undefined,
+      redirectedReference: ts.ResolvedProjectReference | undefined,
+      compilerOptions: ts.CompilerOptions,
+    ): (ts.ResolvedModule | undefined)[] =>
+      moduleNames.map((moduleName) => {
+        if (moduleName.startsWith(ROOT_HOST_PREFIX)) {
+          moduleName = fs.resolve('/' + moduleName.slice(ROOT_HOST_PREFIX.length));
+        }
+        return ts.resolveModuleName(
+          moduleName,
+          containingFile,
+          compilerOptions,
+          overlayHost,
+          /* cache */ undefined,
+          redirectedReference,
+        ).resolvedModule;
+      });
+  }
+
   const programRootNames: string[] = [...rootNames];
   for (const tcbPath of tcbFileMap.keys()) {
     programRootNames.push(tcbPath);
@@ -562,6 +609,23 @@ export function performNgpCompilationSync(params: {
   const tsProgram = ts.createProgram(programRootNames, options, overlayHost);
 
   const allDiagnostics: ts.Diagnostic[] = [];
+  // `NgtscProgram` verifies the TypeScript version in its constructor and `performCompilation`
+  // surfaces the thrown error as an `UNKNOWN_ERROR_CODE` diagnostic. Mirror that here.
+  if (!options.disableTypeScriptVersionCheck) {
+    try {
+      verifySupportedTypeScriptVersion();
+    } catch (e) {
+      allDiagnostics.push({
+        category: ts.DiagnosticCategory.Error,
+        messageText: (e as Error).message,
+        code: UNKNOWN_ERROR_CODE,
+        source: 'angular',
+        file: undefined,
+        start: undefined,
+        length: undefined,
+      });
+    }
+  }
   for (const thrown of processorThrownErrors) {
     const origSf = getOriginalSourceFile(thrown.fsFilePath);
     allDiagnostics.push({
@@ -597,12 +661,20 @@ export function performNgpCompilationSync(params: {
     }
   }
 
-  // 2. Collect NGP analyzer & processor diagnostics from compiler.diagnosticsMap
-  for (const [diagPosixPath, ngDiags] of compiler.diagnosticsMap.entries()) {
-    const diagFsPath = fromPosixPath(fs, diagPosixPath);
-    const origSf = getOriginalSourceFile(diagFsPath);
+  // 2. Collect NGP analyzer & processor diagnostics from compiler.diagnosticsMap. Entries are
+  // keyed by the analyzed file, but a diagnostic may point elsewhere (e.g. an NgModule cycle is
+  // reported on the imported module's name), so prefer the diagnostic's own path.
+  const sortedDiagEntries = Array.from(compiler.diagnosticsMap.entries()).sort(([a], [b]) =>
+    a < b ? -1 : a > b ? 1 : 0,
+  );
+  for (const [diagPosixPath, ngDiags] of sortedDiagEntries) {
     for (const ngDiag of ngDiags) {
-      allDiagnostics.push(convertNgDiagnosticToTs(ngDiag, origSf));
+      const origSf = getOriginalSourceFile(fromPosixPath(fs, ngDiag.filePath ?? diagPosixPath));
+      allDiagnostics.push(
+        convertNgDiagnosticToTs(ngDiag, origSf, (relatedPosixPath) =>
+          getOriginalSourceFile(fromPosixPath(fs, relatedPosixPath)),
+        ),
+      );
     }
   }
 
@@ -930,6 +1002,7 @@ function createPreprocessedLookup(
 export function convertNgDiagnosticToTs(
   ngDiag: NgDiagnostic,
   sourceFile: ts.SourceFile | undefined,
+  getRelatedSourceFile?: (filePath: string) => ts.SourceFile | undefined,
 ): ts.Diagnostic {
   let category = ts.DiagnosticCategory.Error;
   if (ngDiag.category === 0) {
@@ -946,16 +1019,42 @@ export function convertNgDiagnosticToTs(
     rawCode > 0 && rawCode < 90000 ? ngErrorCode(rawCode as unknown as ErrorCode) : rawCode;
   const start = ngDiag.span?.start;
   const length = ngDiag.span ? Math.max(0, ngDiag.span.end - ngDiag.span.start) : undefined;
-
-  return {
+  const next = ngDiag.next ?? [];
+  const messageText: string | ts.DiagnosticMessageChain =
+    next.length === 0
+      ? ngDiag.messageText
+      : {
+          messageText: ngDiag.messageText,
+          category,
+          code: 0,
+          next: next.map((messageText) => ({
+            messageText,
+            category: ts.DiagnosticCategory.Message,
+            code: 0,
+          })),
+        };
+  const diagnostic: ts.Diagnostic = {
     file: sourceFile,
     start,
     length,
-    messageText: ngDiag.messageText,
+    messageText,
     category,
     code,
     source: 'ngtsc',
   };
+  if (ngDiag.relatedInformation !== undefined && ngDiag.relatedInformation.length > 0) {
+    diagnostic.relatedInformation = ngDiag.relatedInformation.map((related) => ({
+      file: related.filePath
+        ? (getRelatedSourceFile?.(related.filePath) ?? sourceFile)
+        : sourceFile,
+      start: related.span.start,
+      length: Math.max(0, related.span.end - related.span.start),
+      messageText: related.messageText,
+      category: ts.DiagnosticCategory.Message,
+      code: 0,
+    }));
+  }
+  return diagnostic;
 }
 
 function findClosestPrecedingNode(
@@ -1291,7 +1390,7 @@ export function createNgpBoundTemplate(
 export function createNgpTestCompiler(
   fs: FileSystem,
   inputFiles: readonly string[],
-  options: api.CompilerOptions,
+  options: CompilerOptions,
   program: ts.Program,
 ) {
   let currentResult!: NgpCompilationResult;

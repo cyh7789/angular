@@ -10,12 +10,25 @@ use std::collections::HashMap;
 #[cfg_attr(feature = "napi", napi(object))]
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub struct NgRelatedInformation {
+    pub file_path: String,
+    pub span: SpanMetadata,
+    pub message_text: String,
+}
+
+#[cfg_attr(feature = "napi", napi(object))]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct NgDiagnostic {
     pub category: u8,
     pub code: u32,
     pub message_text: String,
     pub file_path: Option<String>,
     pub span: Option<SpanMetadata>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub next: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub related_information: Vec<NgRelatedInformation>,
 }
 
 impl NgDiagnostic {
@@ -45,7 +58,26 @@ impl NgDiagnostic {
             message_text: diag.message.to_string(),
             file_path,
             span,
+            next: Vec::new(),
+            related_information: Vec::new(),
         }
+    }
+
+    pub fn error(code: u32, file_path: String, span: SpanMetadata, message_text: String) -> Self {
+        Self {
+            category: 1,
+            code,
+            message_text,
+            file_path: Some(file_path),
+            span: Some(span),
+            next: Vec::new(),
+            related_information: Vec::new(),
+        }
+    }
+
+    pub fn with_related_information(mut self, related: Vec<NgRelatedInformation>) -> Self {
+        self.related_information = related;
+        self
     }
 }
 
@@ -88,6 +120,16 @@ pub struct AnalyzerOptions {
     /// `AnalysisResult.top_level_value_bindings`). Falls back to the tsconfig's
     /// `angularCompilerOptions._enableHmr` when unset.
     pub enable_hmr: Option<bool>,
+    /// Populate `resolved_declarations` and `schemas` on poisoned components (for the language
+    /// service and `_compilePoisonedComponents`). Falls back to the tsconfig's
+    /// `angularCompilerOptions._compilePoisonedComponents` when unset.
+    pub use_poisoned_data: Option<bool>,
+    /// ngtsc's `_useHostForImportGeneration` / `_useHostForImportAndAliasGeneration`: emit
+    /// module specifiers the way the compiler host would name files (`PrefixImportStrategy`
+    /// from `workspace_name` + `root_dirs`) rather than relative paths. Falls back to the
+    /// tsconfig's `angularCompilerOptions` when unset. Without a `workspace_name` the flag has
+    /// no effect, as in ngtsc when the host has no `fileNameToModuleName`.
+    pub use_host_for_import_generation: Option<bool>,
 }
 
 #[cfg_attr(feature = "napi", napi(object))]

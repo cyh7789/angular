@@ -100,16 +100,21 @@ async fn resolve_host_directives_for_class<Fs: ResourceResolverFs + Clone + 'sta
     Some(resolved)
 }
 
-/// Resolve one `hostDirectives` entry written in `declaring_file_path`, including the host
-/// directives it declares in turn.
-async fn resolve_host_directive<Fs: ResourceResolverFs + Clone + 'static>(
+/// The class a `hostDirectives` entry names, looked up in its declaring file.
+struct HostDirectiveClass {
+    decl: crate::evaluator::cross_file::DeclaredSymbol,
+    decl_file_id: crate::query::FileId,
+    symbol_name: String,
+    class_info: Option<crate::ClassInfo>,
+}
+
+/// Chase a `hostDirectives` entry written in `declaring_file_path` to its declaration. `None`
+/// when the symbol itself cannot be resolved (e.g. a package without typings).
+async fn resolve_host_directive_class<Fs: ResourceResolverFs + Clone + 'static>(
     ctx: &QueryCtx<Fs>,
     hd: &crate::types::analysis::HostDirectiveEntry,
     declaring_file_path: &Path,
-    consumer_file: crate::query::FileId,
-    consumer_path: &Path,
-    ancestors: &mut Vec<ReferenceId>,
-) -> Option<ResolvedHostDirective> {
+) -> Option<HostDirectiveClass> {
     let declaring_file_id = ctx.engine.intern_path(declaring_file_path);
     let specifier = hd.directive.specifier_for(
         declaring_file_id,
@@ -143,8 +148,33 @@ async fn resolve_host_directive<Fs: ResourceResolverFs + Clone + 'static>(
             .symbol_name(decl.symbol_id)
             .to_string()
     };
+    let class_info = evaluated.class_index.get(&symbol_name).cloned();
 
-    let hd_class_info = evaluated.class_index.get(&symbol_name)?.clone();
+    Some(HostDirectiveClass {
+        decl,
+        decl_file_id,
+        symbol_name,
+        class_info,
+    })
+}
+
+/// Resolve one `hostDirectives` entry written in `declaring_file_path`, including the host
+/// directives it declares in turn.
+async fn resolve_host_directive<Fs: ResourceResolverFs + Clone + 'static>(
+    ctx: &QueryCtx<Fs>,
+    hd: &crate::types::analysis::HostDirectiveEntry,
+    declaring_file_path: &Path,
+    consumer_file: crate::query::FileId,
+    consumer_path: &Path,
+    ancestors: &mut Vec<ReferenceId>,
+) -> Option<ResolvedHostDirective> {
+    let HostDirectiveClass {
+        decl,
+        decl_file_id,
+        symbol_name,
+        class_info,
+    } = resolve_host_directive_class(ctx, hd, declaring_file_path).await?;
+    let hd_class_info = class_info?;
     if ancestors.contains(&hd_class_info.reference_id) {
         return None;
     }
@@ -177,6 +207,200 @@ async fn resolve_host_directive<Fs: ResourceResolverFs + Clone + 'static>(
     })
 }
 
+struct HostBinding {
+    class_property_name: String,
+    public_name: String,
+    required: bool,
+}
+
+fn host_bindings(info: &crate::ClassInfo, kind: &str) -> Vec<HostBinding> {
+    info.fields
+        .iter()
+        .flatten()
+        .filter(|field| field.kind == kind)
+        .filter_map(|field| match kind {
+            "input" => field.input.as_ref().map(|input| HostBinding {
+                class_property_name: input.name.clone(),
+                public_name: input.alias.clone().unwrap_or_else(|| input.name.clone()),
+                required: input.required,
+            }),
+            _ => field.output.as_ref().map(|output| HostBinding {
+                class_property_name: output.name.clone(),
+                public_name: output.alias.clone().unwrap_or_else(|| output.name.clone()),
+                required: false,
+            }),
+        })
+        .collect()
+}
+
+fn validate_host_directive_mappings(
+    kind: &str,
+    mappings: Option<&[crate::types::metadata::HostDirectiveBinding]>,
+    existing: &[HostBinding],
+    class_name: &str,
+    push: &mut dyn FnMut(u32, String),
+) {
+    let required: Vec<&HostBinding> = existing.iter().filter(|b| b.required).collect();
+    let mut exposed_required = std::collections::HashSet::new();
+
+    for mapping in mappings.into_iter().flatten() {
+        let public_name = &mapping.public_name;
+        let remapped = &mapping.binding_name;
+        let bindings: Vec<&HostBinding> = existing
+            .iter()
+            .filter(|b| &b.public_name == public_name)
+            .collect();
+        if bindings.is_empty() {
+            push(
+                2017, // HOST_DIRECTIVE_UNDEFINED_BINDING
+                format!(
+                    "Directive {class_name} does not have an {kind} with a public name of {public_name}."
+                ),
+            );
+        } else {
+            for binding in bindings {
+                if required
+                    .iter()
+                    .any(|r| r.class_property_name == binding.class_property_name)
+                {
+                    exposed_required.insert(binding.class_property_name.clone());
+                }
+            }
+        }
+
+        if remapped != public_name {
+            for _ in existing.iter().filter(|b| &b.public_name == remapped) {
+                push(
+                    2018, // HOST_DIRECTIVE_CONFLICTING_ALIAS
+                    format!(
+                        "Cannot alias {kind} {public_name} of host directive {class_name} to {remapped}, \
+                         because it already has a different {kind} with the same public name."
+                    ),
+                );
+            }
+        }
+    }
+
+    if !required.is_empty() && required.len() != exposed_required.len() {
+        let missing: Vec<String> = required
+            .iter()
+            .filter(|r| !exposed_required.contains(&r.class_property_name))
+            .map(|r| format!("'{}'", r.public_name))
+            .collect();
+        push(
+            2019, // HOST_DIRECTIVE_MISSING_REQUIRED_BINDING
+            format!(
+                "Required {kind}{} {} from host directive {class_name} must be exposed.",
+                if missing.len() == 1 { "" } else { "s" },
+                missing.join(", ")
+            ),
+        );
+    }
+}
+
+// TODO(parity): ngtsc poisons the class when any of these fire, suppressing its emit.
+async fn validate_own_host_directives<Fs: ResourceResolverFs + Clone + 'static>(
+    ctx: &QueryCtx<Fs>,
+    file_path: &Path,
+    reference_id: ReferenceId,
+    directive: &DirectiveData,
+) -> Vec<crate::NgDiagnostic> {
+    let mut diagnostics = Vec::new();
+    let (Some(entries), Some(container)) = (
+        directive
+            .host_directives
+            .as_ref()
+            .and_then(crate::evaluator::Resolved::get_optional),
+        directive.host_directives_span,
+    ) else {
+        return diagnostics;
+    };
+    if entries.is_empty() {
+        return diagnostics;
+    }
+
+    let syntax = ctx.analyze_file_syntax(reference_id.file).await;
+    let file_path_text = file_path.to_string_lossy().into_owned();
+
+    for entry in &entries {
+        let span = entry
+            .origin_identifiers
+            .iter()
+            .find(|id| id.start >= container.start && id.end <= container.end)
+            .copied()
+            .unwrap_or(container);
+        let span = crate::types::metadata::SpanMetadata::new(span, &syntax.converter);
+        let mut push = |code: u32, message: String| {
+            diagnostics.push(crate::NgDiagnostic::error(
+                code,
+                file_path_text.clone(),
+                span,
+                message,
+            ));
+        };
+
+        let Some(resolved) = resolve_host_directive_class(ctx, entry, file_path).await else {
+            continue;
+        };
+        let Some(class_info) = resolved.class_info else {
+            push(
+                2013, // HOST_DIRECTIVE_INVALID
+                format!(
+                    "{} must be a standalone directive to be used as a host directive",
+                    resolved.symbol_name
+                ),
+            );
+            continue;
+        };
+        if !matches!(
+            class_info.class_type,
+            ClassType::Directive | ClassType::Component
+        ) {
+            push(
+                2013, // HOST_DIRECTIVE_INVALID
+                format!(
+                    "{} must be a standalone directive to be used as a host directive",
+                    class_info.class_name
+                ),
+            );
+            continue;
+        }
+
+        let host_meta = flatten_class_info(class_info, ctx).await;
+        let class_name = host_meta.class_name.clone();
+        let is_dts = crate::utils::is_dts(&ctx.engine.lookup_path(resolved.decl_file_id));
+        if !crate::query::module_scope::is_standalone_class(&host_meta, is_dts) {
+            push(
+                2014, // HOST_DIRECTIVE_NOT_STANDALONE
+                format!("Host directive {class_name} must be standalone"),
+            );
+        }
+        if host_meta.class_type == ClassType::Component {
+            push(
+                2015, // HOST_DIRECTIVE_COMPONENT
+                format!("Host directive {class_name} cannot be a component"),
+            );
+        }
+
+        validate_host_directive_mappings(
+            "input",
+            entry.inputs.as_deref(),
+            &host_bindings(&host_meta, "input"),
+            &class_name,
+            &mut push,
+        );
+        validate_host_directive_mappings(
+            "output",
+            entry.outputs.as_deref(),
+            &host_bindings(&host_meta, "output"),
+            &class_name,
+            &mut push,
+        );
+    }
+
+    diagnostics
+}
+
 /// Resolve the `hostDirectives` a class declares on itself, in its own file's frame — what
 /// ngtsc's `TypeCheckScopeRegistry` puts in `directivesOnHost` ahead of the class itself when
 /// type-checking its host bindings. Shared by components and directives.
@@ -199,7 +423,8 @@ async fn resolve_own_host_directives<Fs: ResourceResolverFs + Clone + 'static>(
 }
 
 /// Stage 2 for a directive: resolve its own `hostDirectives` for the host binding type-check
-/// block. The directive's template scope does not exist, so this is all it needs cross-file.
+/// block, and validate them. The directive's template scope does not exist, so this is all it
+/// needs cross-file.
 pub async fn optimize_directive<Fs: ResourceResolverFs + Clone + 'static>(
     ctx: &QueryCtx<Fs>,
     file_path: &Path,
@@ -209,6 +434,8 @@ pub async fn optimize_directive<Fs: ResourceResolverFs + Clone + 'static>(
 ) {
     directive.resolved_host_directives =
         resolve_own_host_directives(ctx, file_path, reference_id, class_name).await;
+    directive.host_directive_diagnostics =
+        validate_own_host_directives(ctx, file_path, reference_id, directive).await;
 }
 
 /// Resolve the `hostDirectives` of a scope entry, looking its class up in its declaring file.
@@ -258,22 +485,6 @@ fn collect_declaration_tuples(
                 synthetic: reference.synthetic,
             });
             Ok(())
-        }
-        crate::evaluator::ResolvedValue::Synthetic(
-            crate::evaluator::value::SyntheticValue::ModuleWithProviders { ng_module, .. },
-        ) => {
-            out.push(EvaluatedDeclaration {
-                reference: crate::types::analysis::Reference::from_value_reference(ng_module),
-                synthetic: ng_module.synthetic,
-            });
-            Ok(())
-        }
-        // The structural ModuleWithProviders shape: a map with an `ngModule` reference.
-        crate::evaluator::ResolvedValue::Map(map) => {
-            let Some(ng_module) = map.get("ngModule") else {
-                return Err(crate::evaluator::DynamicReason::InvalidExpressionType);
-            };
-            collect_declaration_tuples(ng_module, out)
         }
         crate::evaluator::ResolvedValue::Dynamic(dynamic) => Err(dynamic.reason.clone()),
         _ => Err(crate::evaluator::DynamicReason::InvalidExpressionType),
@@ -386,6 +597,13 @@ pub async fn optimize_component<Fs: ResourceResolverFs + Clone + 'static>(
     let comp_span_start = comp_class.map(|c| c.span.start).unwrap_or(0);
 
     if !component.directive.standalone {
+        if component.imports_factory_span.is_some()
+            || component.deferred_imports_span.is_some()
+            || component.foreign_imports_span.is_some()
+        {
+            component.is_poisoned = true;
+        }
+
         let mapping = ctx.component_mapping().await;
 
         // An anonymous component (no class name) can't be keyed into the module mapping; it is
@@ -393,6 +611,14 @@ pub async fn optimize_component<Fs: ResourceResolverFs + Clone + 'static>(
         // ngtsc's `getScopeForComponent` gives it no scope, and validation reports NG6007.
         let (module_entry, duplicates) =
             mapping.declaring_ng_modules(reference_id.file, class_name);
+        component.directive.duplicate_declaration_context =
+            crate::query::module_scope::duplicate_declaration_context(
+                ctx,
+                reference_id.file,
+                class_name.unwrap_or_default(),
+                &duplicates,
+            )
+            .await;
         component.directive.duplicate_declaring_ng_modules = duplicates;
 
         let Some(module_ref) = module_entry else {
@@ -403,6 +629,15 @@ pub async fn optimize_component<Fs: ResourceResolverFs + Clone + 'static>(
 
         let module_meta = ctx.analyze_file_syntax(module_ref.file).await;
         component.directive.declaring_ng_module = Some(module_ref);
+
+        if ctx.ngmodule_scope_registry().await.is_poisoned(module_ref) {
+            component.is_poisoned = true;
+        }
+        if component.is_poisoned && !ctx.engine.use_poisoned_data {
+            component.resolved_declarations = Some(Vec::new());
+            component.raw_imports_span = None;
+            return;
+        }
 
         let schemas_to_apply = module_meta
             .symbol_index
@@ -449,138 +684,177 @@ pub async fn optimize_component<Fs: ResourceResolverFs + Clone + 'static>(
         .await;
         component.resolved_declarations = Some(resolved_declarations);
         component.raw_imports_span = None;
-    } else if component.imports.is_some() || !component.parsed_imports.is_empty() {
-        // Prefer Stage-1 partial evaluation (`component.imports`), which handles imported constant
-        // arrays/tuples, spreads, and `ModuleWithProviders` calls. Fall back to identifier-rooted
-        // `parsed_imports` if evaluation hits a dynamic entry (e.g. unwrapping `X.forRoot()` syntactically).
-        enum Entry {
-            Evaluated(crate::types::analysis::Reference),
-            Parsed(DeclarationTuple),
-        }
-
-        let mut entries: Option<Vec<(Entry, bool)>> = None;
-        if let Some(imports_eval) = &mut component.imports {
-            imports_eval
-                .complete_with(ctx, crate::analyzer::resolvers::angular_foreign_resolvers())
-                .await;
-            let mut evaluated = Vec::new();
-            if collect_declaration_tuples(imports_eval.raw(), &mut evaluated).is_ok() {
-                entries = Some(
-                    evaluated
-                        .into_iter()
-                        .map(|decl| (Entry::Evaluated(decl.reference), decl.synthetic))
-                        .collect(),
-                );
-            }
-        }
-        let used_evaluated_entries = entries.is_some();
-        let entries = entries.unwrap_or_else(|| {
-            component
-                .parsed_imports
-                .iter()
-                .map(|i| (Entry::Parsed(i.to_declaration_tuple()), i.is_forward_ref))
-                .collect()
-        });
-
-        let mut resolved_declarations = Vec::new();
-        // The legacy path with nothing to resolve (slot evaluation failed and no
-        // identifier-rooted imports survived extraction) must keep the runtime fallback.
-        let mut all_resolved = used_evaluated_entries || !entries.is_empty();
-
-        let resolve_futures = entries.iter().map(|(entry, _)| {
-            let ctx = ctx.clone();
-            async move {
-                match entry {
-                    Entry::Evaluated(r) => crate::query::resolve_reference_async(r, &ctx).await,
-                    Entry::Parsed(tuple) => resolve_declaration_async(tuple, file_path, &ctx).await,
+    } else {
+        if syntax_file
+            .classes
+            .iter()
+            .any(|c| c.as_ng_module().is_some())
+        {
+            let mapping = ctx.component_mapping().await;
+            let (module_entry, _) = mapping.declaring_ng_modules(reference_id.file, class_name);
+            if let Some(module_ref) = module_entry {
+                if ctx.ngmodule_scope_registry().await.is_poisoned(module_ref) {
+                    component.is_poisoned = true;
                 }
             }
-        });
-        let results = futures::future::join_all(resolve_futures).await;
+        }
+        if component.imports.is_some() || !component.parsed_imports.is_empty() {
+            // Prefer Stage-1 partial evaluation (`component.imports`), which handles imported constant
+            // arrays/tuples, spreads, and `ModuleWithProviders` calls. Fall back to identifier-rooted
+            // `parsed_imports` if evaluation hits a dynamic entry (e.g. unwrapping `X.forRoot()` syntactically).
+            enum Entry {
+                Evaluated(crate::types::analysis::Reference),
+                Parsed(DeclarationTuple),
+            }
 
-        for ((entry, is_forward_ref), resolved_info) in entries.iter().zip(results) {
-            let Some(class_info) = resolved_info else {
-                all_resolved = false;
-                continue;
-            };
-
-            let flattened = flatten_class_info(class_info.clone(), ctx).await;
-
-            let reference = match entry {
-                Entry::Evaluated(r) => r.clone(),
-                Entry::Parsed(tuple) => {
-                    legacy_import_reference(tuple, &class_info, reference_id.file)
-                }
-            };
-
-            let same_file = reference.file == reference_id.file;
-
-            let decl_class = syntax_file
-                .classes
-                .iter()
-                .find(|c| c.class_name.as_deref() == Some(&reference.name));
-            let decl_span_start = decl_class.map(|c| c.span.start).unwrap_or(0);
-            let is_fw = *is_forward_ref || (same_file && decl_span_start > comp_span_start);
-
-            if class_info.class_type == ClassType::NgModule {
-                if let Some(decl) = DeclarationData::from_class_info(
-                    reference.clone(),
-                    &class_info,
-                    &flattened,
-                    is_fw,
-                ) {
-                    let contextual_decl =
-                        contextualize_declaration(ctx, &decl, reference_id.file, file_path).await;
-                    resolved_declarations.push(contextual_decl);
-                }
-                let scope = ctx.ngmodule_exports_scope(class_info.reference_id).await;
-                let propagated_scope = crate::query::propagate_owning_reference_validated(
+            let mut entries: Option<Vec<(Entry, bool)>> = None;
+            if let Some(imports_eval) = &mut component.imports {
+                imports_eval
+                    .complete_with(ctx, crate::analyzer::resolvers::angular_foreign_resolvers())
+                    .await;
+                let validation = crate::query::module_scope::validate_standalone_imports(
                     ctx,
-                    &scope,
-                    &reference.owning_reference,
-                    class_info.reference_id.file,
-                )
-                .await;
-                for sub_decl in propagated_scope {
-                    let mut contextual_sub_decl =
-                        contextualize_declaration(ctx, &sub_decl, reference_id.file, file_path)
-                            .await;
-                    contextual_sub_decl.resolved_host_directives =
-                        resolve_host_directives_for_declaration(
-                            ctx,
-                            &sub_decl,
-                            reference_id.file,
-                            file_path,
-                        )
-                        .await;
-                    resolved_declarations.push(contextual_sub_decl);
-                }
-            } else if let Some(decl) =
-                DeclarationData::from_class_info(reference, &class_info, &flattened, is_fw)
-            {
-                let mut contextual_decl =
-                    contextualize_declaration(ctx, &decl, reference_id.file, file_path).await;
-                contextual_decl.resolved_host_directives = resolve_host_directives_for_class(
-                    ctx,
-                    &class_info,
                     reference_id.file,
-                    file_path,
-                    &mut Vec::new(),
+                    imports_eval.raw(),
+                    component.imports_factory_span,
                 )
                 .await;
-                resolved_declarations.push(contextual_decl);
-            } else {
-                all_resolved = false;
+                component.import_diagnostics = validation.diagnostics;
+                if validation.is_poisoned {
+                    component.is_poisoned = true;
+                }
+                if component.is_poisoned && !ctx.engine.use_poisoned_data {
+                    component.resolved_declarations = Some(Vec::new());
+                    component.raw_imports_span = None;
+                    return;
+                }
+                let mut evaluated = Vec::new();
+                if collect_declaration_tuples(imports_eval.raw(), &mut evaluated).is_ok() {
+                    entries = Some(
+                        evaluated
+                            .into_iter()
+                            .map(|decl| (Entry::Evaluated(decl.reference), decl.synthetic))
+                            .collect(),
+                    );
+                }
             }
-        }
+            if component.is_poisoned && !ctx.engine.use_poisoned_data {
+                component.resolved_declarations = Some(Vec::new());
+                component.raw_imports_span = None;
+                return;
+            }
+            let used_evaluated_entries = entries.is_some();
+            let entries = entries.unwrap_or_else(|| {
+                component
+                    .parsed_imports
+                    .iter()
+                    .map(|i| (Entry::Parsed(i.to_declaration_tuple()), i.is_forward_ref))
+                    .collect()
+            });
 
-        component.resolved_declarations = Some(resolved_declarations);
+            let mut resolved_declarations = Vec::new();
+            // The legacy path with nothing to resolve (slot evaluation failed and no
+            // identifier-rooted imports survived extraction) must keep the runtime fallback.
+            let mut all_resolved = used_evaluated_entries || !entries.is_empty();
 
-        // When any import could not be resolved statically, keep `raw_imports_span` so the
-        // emitter falls back to the raw source expression (runtime resolution). This is a
-        // supported path (the norm in local mode), not an error, so it is deliberately silent.
-        if all_resolved {
-            component.raw_imports_span = None;
+            let resolve_futures = entries.iter().map(|(entry, _)| {
+                let ctx = ctx.clone();
+                async move {
+                    match entry {
+                        Entry::Evaluated(r) => crate::query::resolve_reference_async(r, &ctx).await,
+                        Entry::Parsed(tuple) => {
+                            resolve_declaration_async(tuple, file_path, &ctx).await
+                        }
+                    }
+                }
+            });
+            let results = futures::future::join_all(resolve_futures).await;
+
+            for ((entry, is_forward_ref), resolved_info) in entries.iter().zip(results) {
+                let Some(class_info) = resolved_info else {
+                    all_resolved = false;
+                    continue;
+                };
+
+                let flattened = flatten_class_info(class_info.clone(), ctx).await;
+
+                let reference = match entry {
+                    Entry::Evaluated(r) => r.clone(),
+                    Entry::Parsed(tuple) => {
+                        legacy_import_reference(tuple, &class_info, reference_id.file)
+                    }
+                };
+
+                let same_file = reference.file == reference_id.file;
+
+                let decl_class = syntax_file
+                    .classes
+                    .iter()
+                    .find(|c| c.class_name.as_deref() == Some(&reference.name));
+                let decl_span_start = decl_class.map(|c| c.span.start).unwrap_or(0);
+                let is_fw = *is_forward_ref || (same_file && decl_span_start > comp_span_start);
+
+                if class_info.class_type == ClassType::NgModule {
+                    if let Some(decl) = DeclarationData::from_class_info(
+                        reference.clone(),
+                        &class_info,
+                        &flattened,
+                        is_fw,
+                    ) {
+                        let contextual_decl =
+                            contextualize_declaration(ctx, &decl, reference_id.file, file_path)
+                                .await;
+                        resolved_declarations.push(contextual_decl);
+                    }
+                    let scope = ctx.ngmodule_exports_scope(class_info.reference_id).await;
+                    let propagated_scope = crate::query::propagate_owning_reference_validated(
+                        ctx,
+                        &scope,
+                        &reference.owning_reference,
+                        class_info.reference_id.file,
+                    )
+                    .await;
+                    for sub_decl in propagated_scope {
+                        let mut contextual_sub_decl =
+                            contextualize_declaration(ctx, &sub_decl, reference_id.file, file_path)
+                                .await;
+                        contextual_sub_decl.resolved_host_directives =
+                            resolve_host_directives_for_declaration(
+                                ctx,
+                                &sub_decl,
+                                reference_id.file,
+                                file_path,
+                            )
+                            .await;
+                        resolved_declarations.push(contextual_sub_decl);
+                    }
+                } else if let Some(decl) =
+                    DeclarationData::from_class_info(reference, &class_info, &flattened, is_fw)
+                {
+                    let mut contextual_decl =
+                        contextualize_declaration(ctx, &decl, reference_id.file, file_path).await;
+                    contextual_decl.resolved_host_directives = resolve_host_directives_for_class(
+                        ctx,
+                        &class_info,
+                        reference_id.file,
+                        file_path,
+                        &mut Vec::new(),
+                    )
+                    .await;
+                    resolved_declarations.push(contextual_decl);
+                } else {
+                    all_resolved = false;
+                }
+            }
+
+            component.resolved_declarations = Some(resolved_declarations);
+
+            // When any import could not be resolved statically, keep `raw_imports_span` so the
+            // emitter falls back to the raw source expression (runtime resolution). This is a
+            // supported path (the norm in local mode), not an error, so it is deliberately silent.
+            if all_resolved {
+                component.raw_imports_span = None;
+            }
         }
     }
 
@@ -790,6 +1064,8 @@ pub async fn optimize_component<Fs: ResourceResolverFs + Clone + 'static>(
     // (ngtsc's `directivesOnHost`). Like any host directive they stay out of its template scope.
     component.resolved_host_directives =
         resolve_own_host_directives(ctx, file_path, reference_id, class_name).await;
+    component.directive.host_directive_diagnostics =
+        validate_own_host_directives(ctx, file_path, reference_id, &component.directive).await;
 
     if let Some(ref mut decls) = component.resolved_declarations {
         DeclarationData::deduplicate(decls);

@@ -37,6 +37,7 @@ import {makeClassKey} from './compiler-utils.js';
 import {OutOfBandDiagnosticRecorderImpl} from './oob.js';
 import {adaptTcbInput, ExtendedTcbTypeParameter} from './tcb_adapter.js';
 import {requiresInlineDeclaration, requiresInlineTypeCheckBlock} from './tcb_util.js';
+import {getTemplateSemanticsDiagnostics} from './template_semantics.js';
 import * as nga from './types.js';
 
 export interface TcbTargetInput {
@@ -153,6 +154,7 @@ export interface PipeMeta {
 
 export interface NgpTypeCheckingConfig extends TypeCheckingConfig {
   typeCheckHostBindings?: boolean;
+  usePoisonedData?: boolean;
 }
 
 export function buildTypeCheckingConfig(
@@ -271,6 +273,8 @@ export function buildTypeCheckingConfig(
     typeCheckingConfig.strictLiteralTypes = options.strictLiteralTypes;
   }
   typeCheckingConfig.typeCheckHostBindings = options.typeCheckHostBindings ?? true;
+  typeCheckingConfig.usePoisonedData =
+    enableTemplateTypeChecker || Boolean(options._compilePoisonedComponents);
 
   return typeCheckingConfig;
 }
@@ -613,6 +617,7 @@ export function generateTcbCode(
   const importManager = new TcbImportManager();
   const oobRecorder = new OutOfBandDiagnosticRecorderImpl();
   const domSchemaChecker = new RegistryDomSchemaChecker();
+  const semanticsDiagnostics: Diagnostic[] = [];
 
   let code = '';
   let functionStrings = '';
@@ -631,6 +636,10 @@ export function generateTcbCode(
     const qualifiedTargetMeta = targetTypeParams
       ? {...targetMeta, typeParameters: targetTypeParams}
       : targetMeta;
+
+    semanticsDiagnostics.push(
+      ...getTemplateSemanticsDiagnostics(typeCheckId, comp.templateNodes, tcbMeta.boundTarget),
+    );
 
     let tcbString = '';
     try {
@@ -675,7 +684,11 @@ export function generateTcbCode(
     imports: importsStr,
     tcbMap,
     templateSources,
-    diagnostics: [...domSchemaChecker.diagnostics, ...oobRecorder.diagnostics],
+    diagnostics: [
+      ...domSchemaChecker.diagnostics,
+      ...oobRecorder.diagnostics,
+      ...semanticsDiagnostics,
+    ],
     isInline: requiresInline,
   };
 }

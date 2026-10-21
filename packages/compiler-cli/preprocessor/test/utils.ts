@@ -407,10 +407,17 @@ export async function runPipeline(
     enableI18nLegacyMessageIdFormat: tsconfigOptions.enableI18nLegacyMessageIdFormat ?? false,
     i18nUseExternalIds: tsconfigOptions.i18nUseExternalIds,
     i18nNormalizeLineEndingsInICUs: tsconfigOptions.i18nNormalizeLineEndingsInICUs,
+    i18nPreserveWhitespaceForLegacyExtraction:
+      tsconfigOptions.i18nPreserveWhitespaceForLegacyExtraction,
   };
 
   const workspaceName = tsconfigOptions.workspaceName;
   const rootDirs = compilerOptions.rootDirs;
+  const useHostForImportGeneration =
+    tsconfigOptions._useHostForImportGeneration ||
+    tsconfigOptions._useHostForImportAndAliasGeneration
+      ? true
+      : undefined;
 
   const outputs: TestFile[] = [];
 
@@ -425,6 +432,14 @@ export async function runPipeline(
     virtualFileMap.set('/' + withoutSlash, f.content);
   }
 
+  const tcbConfig = buildTypeCheckingConfig({
+    strictTemplates: true,
+    checkTypeOfDomBindings: false,
+    ...tsconfigOptions,
+    useContextGenericType:
+      tsconfigOptions.strictContextGenerics ?? tsconfigOptions.useContextGenericType,
+  });
+
   let analyzer;
   if (options.sidecar) {
     const {SidecarAnalyzer} = await import('../api.js');
@@ -432,6 +447,8 @@ export async function runPipeline(
     await sidecar.initialize(tsconfigFile.path, options.optimize, virtualFiles, nodeModulesPath, {
       workspaceName,
       rootDirs,
+      usePoisonedData: tcbConfig.usePoisonedData,
+      useHostForImportGeneration,
     });
     analyzer = sidecar;
   } else {
@@ -444,6 +461,8 @@ export async function runPipeline(
       nodeModulesPathOverride: nodeModulesPath,
       workspaceName,
       rootDirs,
+      usePoisonedData: tcbConfig.usePoisonedData,
+      useHostForImportGeneration,
     });
   }
 
@@ -451,13 +470,7 @@ export async function runPipeline(
     optimize: options.optimize,
     tsconfigPath: tsconfigFile.path,
     virtualFiles,
-    tcbConfig: buildTypeCheckingConfig({
-      strictTemplates: true,
-      checkTypeOfDomBindings: false,
-      ...tsconfigOptions,
-      useContextGenericType:
-        tsconfigOptions.strictContextGenerics ?? tsconfigOptions.useContextGenericType,
-    }),
+    tcbConfig,
     templateParseOptions: {
       enableSelectorless: options.enableSelectorless,
       ...options.templateParseOptions,

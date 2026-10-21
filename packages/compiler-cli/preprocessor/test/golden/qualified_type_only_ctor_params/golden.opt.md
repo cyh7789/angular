@@ -35,11 +35,7 @@ export class TestService {
   static ɵfac: i0.ɵɵFactoryDeclaration<TestService, never> = function TestService_Factory(
     __ngFactoryType__: any,
   ): any {
-    /* @ts-ignore */
-    return new (__ngFactoryType__ || TestService)(
-      i0.ɵɵinject('$q'),
-      i0.ɵɵinject(angular.IQService),
-    );
+    i0.ɵɵinvalidFactory();
   };
   // @ts-ignore
   static ɵprov: i0.ɵɵInjectableDeclaration<any> =
@@ -56,10 +52,7 @@ export class TestService {
         [{ type: Injectable, args: [{ providedIn: 'root' }] }],
         (): any => [
           { type: undefined, decorators: [{ type: Inject, args: ['$q'] }] },
-          {
-            /* @ts-ignore */
-            type: angular.IQService,
-          },
+          { type: undefined },
         ],
         null,
       );
@@ -174,6 +167,26 @@ export class ThirdPartyService {
         null,
       );
   }
+}
+
+```
+
+# /tsconfig.ngdiag.json
+```json
+{
+  "tsconfigPath": "/tsconfig.json",
+  "diagnostics": [
+    {
+      "filePath": "/test.ts",
+      "category": "error",
+      "code": 2003,
+      "messageText": "No suitable injection token for parameter 'readonlyMap' of class 'HybridComponent'. Find more at https://next.angular.dev/errors/NG2003\n  Consider using the @Inject decorator to specify an injection token.",
+      "span": {
+        "start": 668,
+        "end": 679
+      }
+    }
+  ]
 }
 
 ```

@@ -210,12 +210,15 @@ impl Analyzer {
             None => abs_dirs.clone(),
         };
 
+        let use_host_for_import_generation = options
+            .use_host_for_import_generation
+            .unwrap_or(resolved_config.use_host_for_import_generation);
         let reference_strategy: Arc<dyn crate::analyzer::import_emit::ReferenceEmitStrategy> =
             match workspace_name {
-                Some(ws) => Arc::new(crate::analyzer::import_emit::PrefixImportStrategy::new(
-                    ws, root_dirs,
-                )),
-                None => Arc::new(crate::analyzer::import_emit::ApfImportStrategy::new()),
+                Some(ws) if use_host_for_import_generation => Arc::new(
+                    crate::analyzer::import_emit::PrefixImportStrategy::new(ws, root_dirs),
+                ),
+                _ => Arc::new(crate::analyzer::import_emit::ApfImportStrategy::new()),
             };
 
         let engine = crate::query::QueryEngine::new_with_options(
@@ -228,6 +231,10 @@ impl Analyzer {
             resolved_config.compile_non_exported_classes,
             options.enable_hmr.unwrap_or(resolved_config.enable_hmr),
             resolved_config.strict_standalone,
+            options
+                .use_poisoned_data
+                .unwrap_or(resolved_config.compile_poisoned_components),
+            resolved_config.strict_injection_parameters,
         );
 
         let analyzer = Analyzer {
@@ -950,17 +957,25 @@ async fn run_coordinator<S, LA, FutLA, P, FutP, Fs>(
             .unwrap()
     };
 
+    let mut valid_entrypoints = Vec::new();
     for entry in entrypoints {
-        if cancel_token.is_cancelled() {
-            break;
-        }
         if !is_compilation_root(&entry) {
             continue;
         }
         // Dedupe on the case-folded path, but keep the caller's spelling.
         if seen.insert(crate::fs::normalize_path(&entry).into_owned()) {
-            pending_tasks.push(spawn_file_task(entry));
+            // Intern `FileId`s synchronously in entrypoint order before spawning async workers so
+            // `FileId` ordering is deterministic and reflects `tsconfig` root order.
+            engine.intern_path(&entry);
+            valid_entrypoints.push(entry);
         }
+    }
+
+    for entry in valid_entrypoints {
+        if cancel_token.is_cancelled() {
+            break;
+        }
+        pending_tasks.push(spawn_file_task(entry));
     }
 
     let mut event_receiver = event_receiver.fuse();
@@ -985,6 +1000,7 @@ async fn run_coordinator<S, LA, FutLA, P, FutP, Fs>(
                             if !seen.insert(crate::fs::normalize_path(&dep).into_owned()) {
                                 continue;
                             }
+                            engine.intern_path(&dep);
                             pending_tasks.push(spawn_file_task(dep));
                             spawned_any = true;
                         }
@@ -1023,6 +1039,7 @@ async fn run_coordinator<S, LA, FutLA, P, FutP, Fs>(
                             if !seen.insert(crate::fs::normalize_path(&dep).into_owned()) {
                                 continue;
                             }
+                            engine.intern_path(&dep);
                             pending_tasks.push(spawn_file_task(dep));
                         }
                     }
@@ -1038,10 +1055,12 @@ async fn run_coordinator<S, LA, FutLA, P, FutP, Fs>(
         }
     }
 
-    let remaining_states: Vec<_> = uf.states.drain().map(|(_, state)| state).collect();
-    for state in remaining_states {
+    let mut remaining_states: Vec<_> = uf.states.drain().collect();
+    remaining_states.sort_by_key(|(root, _)| *root);
+    for (_, state) in remaining_states {
         if let Some(snd) = &final_sender {
-            let files: Vec<crate::AnalysisResult> = state.completed.into_values().collect();
+            let mut files: Vec<crate::AnalysisResult> = state.completed.into_values().collect();
+            files.sort_by_key(|f| f.file_id);
             if !files.is_empty() {
                 let static_edges = compute_intra_chunk_static_edges(&engine, &files);
                 let _ = snd.unbounded_send(Ok(crate::CompilationChunk {
@@ -1343,8 +1362,9 @@ fn handle_completed_file<Fs: FileSystem + Clone + 'static + ResourceResolverFs>(
         let Some(mut state) = uf.states.remove(&root) else {
             return;
         };
-        let files: Vec<_> = state
-            .members
+        let mut sorted_members: Vec<FileId> = state.members.into_iter().collect();
+        sorted_members.sort();
+        let files: Vec<_> = sorted_members
             .iter()
             .filter_map(|f| state.completed.remove(f))
             .collect();

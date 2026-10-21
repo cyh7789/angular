@@ -17,7 +17,7 @@ import * as fsSync from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as path from 'path';
 import {makeClassKey} from './compiler-utils.js';
-import {withErrorGuide} from './diagnostic.js';
+import {flattenNgDiagnosticMessage, withErrorGuide} from './diagnostic.js';
 import {
   ChunkContext,
   FileAnalysis,
@@ -71,7 +71,7 @@ export function serializeDiagnostics(
           filePath: d.filePath,
           category: d.category === 1 ? 'error' : 'warning',
           code: d.code,
-          messageText: d.messageText,
+          messageText: flattenNgDiagnosticMessage(d),
           span: d.span,
         })),
       },
@@ -136,6 +136,8 @@ export interface HybridCompilerOptions {
   i18nUseExternalIds?: boolean;
   /** Literal inline templates always normalize, whatever this is set to. */
   i18nNormalizeLineEndingsInICUs?: boolean;
+  /** Legacy i18n whitespace preservation fallback for `preserveWhitespaces`. */
+  i18nPreserveWhitespaceForLegacyExtraction?: boolean;
   /**
    * Whether HMR is enabled (`_enableHmr`): emits an HMR initializer after every component and
    * enables `emitHmrUpdateModule`. The analyzer must run with `enableHmr` as well.
@@ -182,6 +184,7 @@ export class HybridCompiler {
     this.virtualFiles = options.virtualFiles;
     this.templateParseOptions = {
       preserveWhitespaces: options.preserveWhitespaces ?? false,
+      preserveSignificantWhitespace: options.i18nPreserveWhitespaceForLegacyExtraction ?? true,
       enableI18nLegacyMessageIdFormat: options.enableI18nLegacyMessageIdFormat !== false,
       i18nNormalizeLineEndingsInICUs: options.i18nNormalizeLineEndingsInICUs === true,
       ...options.templateParseOptions,
@@ -254,11 +257,7 @@ export class HybridCompiler {
   }
 
   async prepareChunk(chunk: nga.CompilationChunk): Promise<ChunkContext> {
-    for (const file of chunk.files) {
-      if (file.diagnostics) {
-        this.diagnosticsMap.set(file.filePath, file.diagnostics.map(withErrorGuide));
-      }
-    }
+    this.recordChunkDiagnostics(chunk);
     await this.writeDiagnosticsFile();
 
     const boundFiles = await Promise.all(
@@ -271,11 +270,7 @@ export class HybridCompiler {
   }
 
   prepareChunkSync(chunk: nga.CompilationChunk): ChunkContext {
-    for (const file of chunk.files) {
-      if (file.diagnostics) {
-        this.diagnosticsMap.set(file.filePath, file.diagnostics.map(withErrorGuide));
-      }
-    }
+    this.recordChunkDiagnostics(chunk);
     this.writeDiagnosticsFileSync();
 
     const boundFiles = chunk.files.map((file) => ({
@@ -283,6 +278,14 @@ export class HybridCompiler {
       analysis: this.ensureBoundWithMetadataSync(file),
     }));
     return this.finalizePreparedChunk(chunk, boundFiles);
+  }
+
+  private recordChunkDiagnostics(chunk: nga.CompilationChunk): void {
+    for (const file of chunk.files) {
+      if (file.diagnostics) {
+        this.diagnosticsMap.set(file.filePath, file.diagnostics.map(withErrorGuide));
+      }
+    }
   }
 
   private finalizePreparedChunk(
@@ -352,6 +355,10 @@ export class HybridCompiler {
         const eagerDecls = [...eagerDirDecls, ...eagerPipeDecls];
         eagerlyUsedDeclarations.set(`${file.filePath}#${className}`, eagerDecls);
 
+        if (classMeta.component.standalone) {
+          continue;
+        }
+
         // Check if any eagerly used dependency is statically cycleProne
         let hasStaticCycle = false;
         for (const decl of eagerDecls) {
@@ -366,7 +373,24 @@ export class HybridCompiler {
           continue;
         }
 
-        // Add eager dependencies to local dynamic graph
+        let createsCycle = false;
+        for (const decl of eagerDecls) {
+          if (
+            chunkFileIds.has(decl.fileId) &&
+            decl.fileId !== file.fileId &&
+            hasGraphPath(dynamicGraph, decl.fileId, file.fileId)
+          ) {
+            createsCycle = true;
+            break;
+          }
+        }
+
+        if (createsCycle) {
+          remoteScopedClasses.add(`${file.filePath}#${className}`);
+          continue;
+        }
+
+        // Add eager dependencies to local dynamic graph only when not remote-scoped
         let edges = dynamicGraph.get(file.fileId);
         if (!edges) {
           edges = new Set<number>();
@@ -375,18 +399,6 @@ export class HybridCompiler {
         for (const decl of eagerDecls) {
           if (chunkFileIds.has(decl.fileId) && decl.fileId !== file.fileId) {
             edges.add(decl.fileId);
-          }
-        }
-      }
-    }
-
-    // Detect cycles in the local dynamic graph
-    const cyclicFiles = findCyclicNodes(dynamicGraph);
-    for (const file of chunk.files) {
-      if (cyclicFiles.has(file.fileId)) {
-        for (const classMeta of file.classes) {
-          if (classMeta.component && classMeta.className) {
-            remoteScopedClasses.add(`${file.filePath}#${classMeta.className}`);
           }
         }
       }
@@ -811,6 +823,29 @@ export class HybridCompiler {
 /** Uncached empty analysis for a file the analyzer has no metadata for. */
 function unanalyzedFile(filePath: string): FileAnalysis {
   return {filePath, parsedTemplates: new Map(), preparedTcbData: null};
+}
+
+export function hasGraphPath(
+  graph: ReadonlyMap<number, ReadonlySet<number>>,
+  start: number,
+  target: number,
+): boolean {
+  if (start === target) return true;
+  const visited = new Set<number>([start]);
+  const stack = [start];
+  while (stack.length > 0) {
+    const current = stack.pop()!;
+    const neighbors = graph.get(current);
+    if (!neighbors) continue;
+    for (const neighbor of neighbors) {
+      if (neighbor === target) return true;
+      if (!visited.has(neighbor)) {
+        visited.add(neighbor);
+        stack.push(neighbor);
+      }
+    }
+  }
+  return false;
 }
 
 export function findCyclicNodes(graph: ReadonlyMap<number, ReadonlySet<number>>): Set<number> {

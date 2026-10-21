@@ -139,6 +139,8 @@ pub struct ClassData {
     pub name_span: Option<oxc_span::Span>,
     pub class_name: Option<String>,
     pub constructor_params: Option<Vec<ConstructorParamMetadata>>,
+    pub ctor_params_di: Vec<super::CtorParamDi>,
+    pub is_abstract: bool,
     /// Constructor parameter decorators ngtsc rejects outright; see [`UnexpectedParamDecorator`].
     pub unexpected_param_decorators: Vec<UnexpectedParamDecorator>,
     /// The class decorators' argument-shape problems (arity, non-literal argument, bare
@@ -267,11 +269,13 @@ pub struct DirectiveData {
     /// The `hostDirectives` expression, partially evaluated. Kept as a `Resolved` so
     /// Stage 2 can chase cross-file arrays and aliases before it is projected onto the wire.
     pub host_directives: Option<Resolved<Vec<HostDirectiveEntry>>>,
+    pub host_directives_span: Option<oxc_span::Span>,
     /// The directive's own `hostDirectives`, resolved in stage 2 — what ngtsc's
     /// `TypeCheckScopeRegistry` puts in `directivesOnHost` ahead of the directive itself when
     /// type-checking its host bindings. Components keep theirs on
     /// [`ComponentData::resolved_host_directives`].
     pub resolved_host_directives: Option<Vec<ResolvedHostDirective>>,
+    pub host_directive_diagnostics: Vec<crate::NgDiagnostic>,
     pub providers_span: Option<oxc_span::Span>,
     /// `providers` as the partial evaluator sees it, for the undecorated-provider check only
     /// (the field itself is emitted verbatim from `providers_span`).
@@ -286,6 +290,9 @@ pub struct DirectiveData {
     pub evaluated_io: Option<Box<crate::analyzer::evaluated_io::EvaluatedIo>>,
     /// Input/output declarations that did not evaluate to the shape ngtsc requires.
     pub io_issues: Vec<ValueIssue>,
+    /// The `transform` of every decorator input written in place, for the checks needing the
+    /// transform function's definition.
+    pub input_transforms: Vec<super::transforms::InputTransformSite>,
     pub host_bindings: Vec<HostBindingData>,
     pub host_listeners: Vec<HostListenerData>,
 
@@ -296,6 +303,7 @@ pub struct DirectiveData {
     /// `LocalModuleScopeRegistry.getDuplicateDeclarations`). `declaring_ng_module` is then
     /// `None`, and validation reports NG6007. Only the semantic pass fills it in.
     pub duplicate_declaring_ng_modules: Vec<crate::query::ReferenceId>,
+    pub duplicate_declaration_context: Vec<crate::NgRelatedInformation>,
     pub is_jit: bool,
     pub decorator_name: Option<String>,
 }
@@ -456,7 +464,9 @@ impl Default for DirectiveData {
             host_span: None,
             host_properties: Vec::new(),
             host_directives: None,
+            host_directives_span: None,
             resolved_host_directives: None,
+            host_directive_diagnostics: Vec::new(),
             providers_span: None,
             providers: None,
             args_span: None,
@@ -464,6 +474,7 @@ impl Default for DirectiveData {
             fields: Vec::new(),
             evaluated_io: None,
             io_issues: Vec::new(),
+            input_transforms: Vec::new(),
             host_bindings: Vec::new(),
             host_listeners: Vec::new(),
 
@@ -471,6 +482,7 @@ impl Default for DirectiveData {
             service: None,
             declaring_ng_module: None,
             duplicate_declaring_ng_modules: Vec::new(),
+            duplicate_declaration_context: Vec::new(),
             is_jit: false,
             decorator_name: None,
         }
@@ -555,6 +567,8 @@ pub struct ValueIssue {
     pub code: &'static str,
     pub span: oxc_span::Span,
     pub message: String,
+    pub next: Vec<String>,
+    pub related: Vec<(oxc_span::Span, String)>,
 }
 
 impl ValueIssue {
@@ -600,6 +614,45 @@ impl ValueIssue {
             span,
             crate::evaluator::wrong_type_message(message, value),
         )
+    }
+
+    /// `VALUE_HAS_WRONG_TYPE` (`NG1010`) with the detail of `createValueHasWrongTypeError`
+    /// chained under the message.
+    pub fn wrong_type_with_detail(span: oxc_span::Span, message: &str, detail: &str) -> Self {
+        let mut issue = Self::new("1010", span, message);
+        issue.next.push(detail.to_string());
+        issue
+    }
+
+    /// `CONFLICTING_INPUT_TRANSFORM` (`NG2020`).
+    pub fn conflicting_input_transform(span: oxc_span::Span, input: &str) -> Self {
+        Self::new(
+            "2020",
+            span,
+            format!(
+                "Class cannot have both a transform function on Input {input} and a static \
+                 member called ngAcceptInputType_{input}"
+            ),
+        )
+    }
+
+    /// `SYMBOL_NOT_EXPORTED` (`NG3001`) for the type of an input transform's parameter.
+    pub fn symbol_not_exported(span: oxc_span::Span, decl_span: oxc_span::Span) -> Self {
+        let mut issue = Self::new(
+            "3001",
+            span,
+            "Symbol must be exported in order to be used as the type of an Input transform \
+             function",
+        );
+        issue
+            .related
+            .push((decl_span, "The symbol is declared here.".to_string()));
+        issue
+    }
+
+    /// `IMPORT_GENERATION_FAILURE` (`NG3004`) for a type that cannot be imported.
+    pub fn import_generation_failure(span: oxc_span::Span, name: &str) -> Self {
+        Self::new("3004", span, format!("Unable to import type {name}."))
     }
 
     /// `VALUE_NOT_LITERAL` (`NG1011`).
@@ -659,6 +712,95 @@ impl ValueIssue {
                  not have an Angular decorator. This will result in an error at runtime.\n\n\
                  Either add the @Injectable() decorator to '{class_name}', or configure a \
                  different provider (such as a provider with 'useFactory').\n"
+            ),
+        )
+    }
+
+    /// `PARAM_MISSING_TOKEN` (`NG2003`), ngtsc's `createUnsuitableInjectionTokenError`.
+    /// https://github.com/angular/angular/blob/e3ac727/packages/compiler-cli/src/ngtsc/annotations/common/src/di.ts#L191-L264
+    pub fn param_missing_token(
+        class_name: &str,
+        index: usize,
+        param: &super::CtorParamDi,
+        reason: super::UnavailableValue,
+    ) -> Self {
+        use super::UnavailableValue;
+
+        let param_name = param.name.clone().unwrap_or_else(|| index.to_string());
+        let mut issue = Self::new(
+            "2003",
+            param.name_span,
+            format!(
+                "No suitable injection token for parameter '{param_name}' of class '{class_name}'."
+            ),
+        );
+        let mut related = |span: Option<oxc_span::Span>, message: &str| {
+            if let Some(span) = span {
+                issue.related.push((span, message.to_string()));
+            }
+        };
+        let hint = match reason {
+            UnavailableValue::Unsupported => {
+                related(
+                    param.type_span,
+                    "This type is not supported as injection token.",
+                );
+                "Consider using the @Inject decorator to specify an injection token."
+            }
+            UnavailableValue::NoValueDeclaration { decl } => {
+                related(
+                    param.type_span,
+                    "This type does not have a value, so it cannot be used as injection token.",
+                );
+                related(decl, "The type is declared here.");
+                "Consider using the @Inject decorator to specify an injection token."
+            }
+            UnavailableValue::TypeOnlyImport { import } => {
+                related(
+                    param.type_span,
+                    "This type is imported using a type-only import, which prevents it from \
+                     being usable as an injection token.",
+                );
+                related(Some(import), "The type-only import occurs here.");
+                "Consider changing the type-only import to a regular import, or use the @Inject \
+                 decorator to specify an injection token."
+            }
+            UnavailableValue::Namespace { import } => {
+                related(
+                    param.type_span,
+                    "This type corresponds with a namespace, which cannot be used as injection \
+                     token.",
+                );
+                related(Some(import), "The namespace import occurs here.");
+                "Consider using the @Inject decorator to specify an injection token."
+            }
+            UnavailableValue::MissingType => {
+                "Consider adding a type to the parameter or use the @Inject decorator to specify \
+                 an injection token."
+            }
+        };
+        issue.next.push(hint.to_string());
+        issue
+    }
+
+    /// `INJECTABLE_INHERITS_INVALID_CONSTRUCTOR` (`NG2016`), ngtsc's
+    /// `getInheritedInvalidCtorDiagnostic`. `kind` is the handler's word for the class.
+    /// https://github.com/angular/angular/blob/e3ac727/packages/compiler-cli/src/ngtsc/annotations/common/src/diagnostics.ts#L457-L472
+    pub fn inherits_invalid_ctor(
+        span: oxc_span::Span,
+        class_name: &str,
+        base_class_name: &str,
+        kind: &str,
+    ) -> Self {
+        Self::new(
+            "2016",
+            span,
+            format!(
+                "The {} {class_name} inherits its constructor from {base_class_name}, but the \
+                 latter has a constructor parameter that is not compatible with dependency \
+                 injection. Either add an explicit constructor to {class_name} or change \
+                 {base_class_name}'s constructor to use parameters that are valid for DI.",
+                kind.to_lowercase()
             ),
         )
     }
@@ -739,6 +881,8 @@ impl ValueIssue {
             code,
             span,
             message: message.into(),
+            next: Vec::new(),
+            related: Vec::new(),
         }
     }
 }
@@ -925,10 +1069,18 @@ pub struct ComponentData {
     /// `read_core_enum_field` applies when the evaluator could not answer.
     pub encapsulation_text: Option<String>,
     pub schemas: Option<Vec<String>>,
+    /// The `schemas` property's value expression span, present whenever the property is.
+    pub schemas_span: Option<oxc_span::Span>,
     pub raw_imports_span: Option<oxc_span::Span>,
     /// Preserved copy of `@Component.imports` expression span, unaffected by same-file scope
     /// resolution. Required by local compilation mode for runtime dependency resolution.
     pub imports_factory_span: Option<oxc_span::Span>,
+    /// Diagnostics about the entries of a standalone component's `imports` (ngtsc's
+    /// `validateStandaloneImports` and the `ModuleWithProviders` rejection of
+    /// `validateAndFlattenComponentImports`), filled by Stage 2. Already in wire form because
+    /// the related information points at the declaring NgModule, possibly in another file.
+    pub import_diagnostics: Vec<crate::NgDiagnostic>,
+    pub is_poisoned: bool,
     pub resolved_declarations: Option<Vec<DeclarationData>>,
     /// The component's own `hostDirectives`, resolved in stage 2 — what ngtsc's
     /// `TypeCheckScopeRegistry` puts in `directivesOnHost` ahead of the component itself. Kept
@@ -1027,6 +1179,7 @@ pub struct PipeData {
     /// `LocalModuleScopeRegistry.getDuplicateDeclarations`). `declaring_ng_module` is then
     /// `None`, and validation reports NG6007. Only the semantic pass fills it in.
     pub duplicate_declaring_ng_modules: Vec<crate::query::ReferenceId>,
+    pub duplicate_declaration_context: Vec<crate::NgRelatedInformation>,
     pub decorator_name: Option<String>,
 }
 
@@ -1215,6 +1368,12 @@ pub struct NgModuleData {
     /// Standalone components listed in `bootstrap` (`NG6009`), found by Stage 2 once the
     /// entries resolve to classes. Empty in local compilation, which never resolves them.
     pub bootstrap_issues: Vec<ValueIssue>,
+    /// The NgModule scope diagnostics this module owns (`LocalModuleScopeRegistry.scopeErrors`
+    /// plus the `resolveTypeList` and out-of-compilation declaration checks of ngtsc's
+    /// `analyze`), filled by Stage 2 from [`crate::query::NgModuleScopeRegistry`]. Already in
+    /// wire form because an entry may point into another file (e.g. the cycle diagnostic lands
+    /// on the imported module's name).
+    pub scope_diagnostics: Vec<crate::NgDiagnostic>,
     /// Raw source spans of the top-level elements of the `imports`/`exports` arrays (each
     /// element verbatim, spreads kept). When the value is not an array literal, a single span
     /// covering the whole expression. Used by LOCAL mode to emit `ɵinj.imports` as the raw
@@ -1390,6 +1549,8 @@ pub struct ValidationContext {
     pub mode: WireMode,
     /// `angularCompilerOptions.strictStandalone`.
     pub strict_standalone: bool,
+    /// `angularCompilerOptions.strictInjectionParameters`.
+    pub strict_injection_parameters: bool,
 }
 
 /// Pure data object holding the context needed for wire serialization.
@@ -1452,7 +1613,7 @@ impl ClassData {
         }
     }
 
-    fn directive_part_mut(&mut self) -> Option<&mut DirectiveData> {
+    pub(crate) fn directive_part_mut(&mut self) -> Option<&mut DirectiveData> {
         match &mut self.decorator {
             DecoratorData::Component(c) => Some(&mut c.directive),
             DecoratorData::Directive(d) => Some(d),
@@ -1812,6 +1973,7 @@ impl ClassData {
             push_issue(diagnostics, file_path, converter, issue);
         }
         self.validate_constructor_param_decorators(file_path, converter, diagnostics);
+        self.validate_constructor_dependencies(cx, file_path, converter, diagnostics);
         self.validate_service_constructor_di(file_path, converter, diagnostics);
         if cx.strict_standalone {
             self.validate_strict_standalone(file_path, converter, diagnostics);
@@ -1819,10 +1981,18 @@ impl ClassData {
         match &self.decorator {
             DecoratorData::Component(c) => {
                 self.validate_directive(&c.directive, false, file_path, converter, diagnostics);
+                self.validate_host_directives(
+                    &c.directive,
+                    cx.mode,
+                    file_path,
+                    converter,
+                    diagnostics,
+                );
                 self.validate_component(c, cx.mode, file_path, converter, diagnostics);
                 self.validate_unique_declaration(
                     "Component",
                     &c.directive.duplicate_declaring_ng_modules,
+                    &c.directive.duplicate_declaration_context,
                     file_path,
                     converter,
                     diagnostics,
@@ -1830,6 +2000,7 @@ impl ClassData {
             }
             DecoratorData::Directive(d) => {
                 self.validate_directive(d, true, file_path, converter, diagnostics);
+                self.validate_host_directives(d, cx.mode, file_path, converter, diagnostics);
                 self.validate_declared_directive_selector(
                     d,
                     cx.mode,
@@ -1840,6 +2011,7 @@ impl ClassData {
                 self.validate_unique_declaration(
                     "Directive",
                     &d.duplicate_declaring_ng_modules,
+                    &d.duplicate_declaration_context,
                     file_path,
                     converter,
                     diagnostics,
@@ -1850,6 +2022,7 @@ impl ClassData {
                 self.validate_unique_declaration(
                     "Pipe",
                     &p.duplicate_declaring_ng_modules,
+                    &p.duplicate_declaration_context,
                     file_path,
                     converter,
                     diagnostics,
@@ -1935,9 +2108,8 @@ impl ClassData {
 
     /// Report a class declared by more than one NgModule (NG6007) on its name, matching ngtsc's
     /// `makeDuplicateDeclarationError` (from `getDirectiveDiagnostics` for components/directives
-    /// and the pipe handler's `resolve`). `kind` is the word ngtsc uses in the message.
-    // TODO(parity): `makeDuplicateDeclarationError` attaches a related-information entry per
-    // declaring NgModule; `NgDiagnostic` does not support related information yet.
+    /// and the pipe handler's `resolve`). `kind` is the word ngtsc uses in the message; `context`
+    /// is the related information naming each declaring NgModule.
     // TODO(parity): ngtsc skips `resolve` (and NG6007) when component analysis is poisoned (e.g.
     // NG2010). ngtsc also reports NG6007 for a standalone component listed in two NgModules, but
     // `optimize_component` only collects declaring NgModules for non-standalone components.
@@ -1945,6 +2117,7 @@ impl ClassData {
         &self,
         kind: &str,
         duplicate_declaring_ng_modules: &[crate::query::ReferenceId],
+        context: &[crate::NgRelatedInformation],
         file_path: &std::path::Path,
         converter: &crate::utils::Utf8ToUtf16,
         diagnostics: &mut Vec<crate::NgDiagnostic>,
@@ -1956,18 +2129,19 @@ impl ClassData {
         else {
             return;
         };
-        push_error(
-            diagnostics,
-            file_path,
-            converter,
-            "6007",
-            name_span,
-            format!("The {kind} '{class_name}' is declared by more than one NgModule."),
+        diagnostics.push(
+            crate::NgDiagnostic::error(
+                6007,
+                file_path.to_string_lossy().into_owned(),
+                crate::types::metadata::SpanMetadata::new(name_span, converter),
+                format!("The {kind} '{class_name}' is declared by more than one NgModule."),
+            )
+            .with_related_information(context.to_vec()),
         );
     }
 
-    /// Report the `id: module.id` anti-pattern (NG6100) and the standalone `bootstrap`
-    /// entries Stage 2 found (NG6009).
+    /// Report the `id: module.id` anti-pattern (NG6100), the standalone `bootstrap`
+    /// entries Stage 2 found (NG6009), and the module's scope diagnostics (NG6xxx).
     fn validate_ng_module(
         &self,
         m: &NgModuleData,
@@ -1978,6 +2152,7 @@ impl ClassData {
         for issue in &m.bootstrap_issues {
             push_issue(diagnostics, file_path, converter, issue);
         }
+        diagnostics.extend(m.scope_diagnostics.iter().cloned());
         let Some(span) = m.module_id_span else {
             return;
         };
@@ -2014,6 +2189,48 @@ impl ClassData {
                 format!("Unexpected decorator {} on parameter.", decorator.name),
             );
         }
+    }
+
+    /// Report the first constructor parameter without a DI token (`NG2003`) when the handler
+    /// validates the constructor dependencies (`validateConstructorDependencies`) instead of
+    /// generating a factory that throws (`unwrapConstructorDependencies`).
+    fn validate_constructor_dependencies(
+        &self,
+        cx: ValidationContext,
+        file_path: &std::path::Path,
+        converter: &crate::utils::Utf8ToUtf16,
+        diagnostics: &mut Vec<crate::NgDiagnostic>,
+    ) {
+        let validates = match &self.decorator {
+            DecoratorData::Component(_) | DecoratorData::Pipe(_) | DecoratorData::NgModule(_) => {
+                true
+            }
+            DecoratorData::Directive(d) => d.selector.is_some(),
+            DecoratorData::Injectable(i) => {
+                cx.strict_injection_parameters && !self.is_abstract && i.requires_valid_ctor()
+            }
+            DecoratorData::Service(_) => false,
+        };
+        if !validates {
+            return;
+        }
+        let Some(class_name) = self.class_name.as_deref() else {
+            return;
+        };
+        let Some((index, param, reason)) = self
+            .ctor_params_di
+            .iter()
+            .enumerate()
+            .find_map(|(index, param)| Some((index, param, param.missing_token()?)))
+        else {
+            return;
+        };
+        push_issue(
+            diagnostics,
+            file_path,
+            converter,
+            &ValueIssue::param_missing_token(class_name, index, param, reason),
+        );
     }
 
     fn validate_service_constructor_di(
@@ -2088,21 +2305,19 @@ impl ClassData {
             })
             .collect();
         let host_issues = host_metadata_issues(d);
+        let transform_issues = d
+            .input_transforms
+            .iter()
+            .filter_map(|site| site.issue.as_ref());
         for issue in d
             .io_issues
             .iter()
             .chain(&unresolved_io_issues)
             .chain(&query_predicate_issues)
             .chain(&host_issues)
+            .chain(transform_issues)
         {
-            push_error(
-                diagnostics,
-                file_path,
-                converter,
-                issue.code,
-                issue.span,
-                issue.message.clone(),
-            );
+            push_issue(diagnostics, file_path, converter, issue);
         }
 
         // ngtsc evaluates `exportAs` and rejects anything that is not statically a string.
@@ -2219,6 +2434,39 @@ impl ClassData {
                 }
             }
         }
+    }
+
+    fn validate_host_directives(
+        &self,
+        d: &DirectiveData,
+        mode: WireMode,
+        file_path: &std::path::Path,
+        converter: &crate::utils::Utf8ToUtf16,
+        diagnostics: &mut Vec<crate::NgDiagnostic>,
+    ) {
+        if mode != WireMode::Semantic {
+            return;
+        }
+        if let (Some(host_directives), Some(span)) = (&d.host_directives, d.host_directives_span) {
+            // A lingering hole means the value was never completed (e.g. a poisoned file);
+            // its entries can't be judged either way.
+            if !host_directives.contains_incomplete() {
+                if let Some(error) =
+                    crate::evaluator::host_directives_shape_error(host_directives.raw())
+                {
+                    push_error(
+                        diagnostics,
+                        file_path,
+                        converter,
+                        "1010",
+                        span,
+                        error.message().to_string(),
+                    );
+                    return;
+                }
+            }
+        }
+        diagnostics.extend(d.host_directive_diagnostics.iter().cloned());
     }
 
     fn validate_component(
@@ -2517,23 +2765,48 @@ impl ClassData {
             // `imports_factory_span` rather than `raw_imports_span`: the latter doubles as
             // "imports still needing runtime resolution" and is cleared as resolution
             // progresses, while the former is a stable record of the `imports` property.
-            let (field, span) = if let Some(span) = c.imports_factory_span {
-                ("imports", span)
+            let import_field = if let Some(span) = c.imports_factory_span {
+                Some(("imports", span))
             } else if let Some(span) = c.deferred_imports_span {
-                ("deferredImports", span)
-            } else if let Some(span) = c.foreign_imports_span {
-                ("foreignImports", span)
+                Some(("deferredImports", span))
             } else {
-                return;
+                c.foreign_imports_span.map(|span| ("foreignImports", span))
             };
-            push_error(
-                diagnostics,
-                file_path,
-                converter,
-                "2010",
-                span,
-                format!("'{field}' is only valid on a component that is standalone."),
-            );
+            if let Some((field, span)) = import_field {
+                let file_path_str = file_path.to_string_lossy().into_owned();
+                diagnostics.push(
+                    crate::NgDiagnostic::error(
+                        2010,
+                        file_path_str.clone(),
+                        crate::types::metadata::SpanMetadata::new(span, converter),
+                        format!("'{field}' is only valid on a component that is standalone."),
+                    )
+                    .with_related_information(vec![
+                        crate::NgRelatedInformation {
+                            file_path: file_path_str,
+                            span: crate::types::metadata::SpanMetadata::new(
+                                self.name_span.unwrap_or(self.span),
+                                converter,
+                            ),
+                            message_text:
+                                "Did you forget to add 'standalone: true' to this @Component?"
+                                    .to_string(),
+                        },
+                    ]),
+                );
+            }
+            // `schemas` is checked separately from the import fields, after them.
+            // https://github.com/angular/angular/blob/e3ac727/packages/compiler-cli/src/ngtsc/annotations/component/src/handler.ts#L700-L710
+            if let Some(span) = c.schemas_span {
+                push_error(
+                    diagnostics,
+                    file_path,
+                    converter,
+                    "2010",
+                    span,
+                    "'schemas' is only valid on a component that is standalone.".to_string(),
+                );
+            }
             return;
         }
 
@@ -2566,6 +2839,8 @@ impl ClassData {
                 message.to_string(),
             );
         }
+
+        diagnostics.extend(c.import_diagnostics.iter().cloned());
     }
 }
 
@@ -2704,6 +2979,23 @@ pub(crate) fn push_issue(
         issue.span,
         issue.message.clone(),
     );
+    let Some(diagnostic) = diagnostics.last_mut() else {
+        return;
+    };
+    diagnostic.next = issue.next.clone();
+    let file_path_str = diagnostic
+        .file_path
+        .clone()
+        .unwrap_or_else(|| file_path.to_string_lossy().into_owned());
+    diagnostic.related_information = issue
+        .related
+        .iter()
+        .map(|(span, message)| crate::NgRelatedInformation {
+            file_path: file_path_str.clone(),
+            span: crate::SpanMetadata::new(*span, converter),
+            message_text: message.clone(),
+        })
+        .collect();
 }
 
 /// [`push_error`] for the codes ngtsc reports as warnings rather than errors, which compile
@@ -2887,6 +3179,15 @@ impl CoreEnum {
 }
 
 impl InjectableData {
+    /// No `use*` field supplies the instance, so the class's own constructor is invoked.
+    /// https://github.com/angular/angular/blob/e3ac727/packages/compiler-cli/src/ngtsc/annotations/src/injectable.ts#L418-L425
+    pub fn requires_valid_ctor(&self) -> bool {
+        self.use_value.is_none()
+            && self.use_existing.is_none()
+            && self.use_class.is_none()
+            && self.use_factory.is_none()
+    }
+
     fn to_wire(
         &self,
         source_text: &str,
@@ -3120,7 +3421,31 @@ struct PreparedMembers {
 /// `useDefineForClassFields`) while preserving them in the `.d.ts`. The `@ts-ignore` guards
 /// against `noImplicitOverride` when the class extends another component.
 /// https://github.com/angular/angular/blob/83622ee/packages/compiler-cli/src/ngtsc/annotations/common/src/input_transforms.ts#L14-L36
-const NG_ACCEPT_INPUT_TYPE_PREFIX: &str = "  // @ts-ignore\n  declare static ngAcceptInputType_";
+const NG_ACCEPT_INPUT_TYPE_PREFIX: &str = "  // @ts-ignore\n  declare static ";
+
+/// The property key of the coercion member for the input declared on `class_property_name`,
+/// quoted when it is not a valid identifier (e.g. `'aria-label'`).
+fn coercion_member_key(class_property_name: &str) -> String {
+    let name = format!("ngAcceptInputType_{class_property_name}");
+    if oxc_syntax::identifier::is_identifier_name(&name) {
+        return name;
+    }
+    let mut quoted = String::with_capacity(name.len() + 2);
+    quoted.push('"');
+    for c in name.chars() {
+        match c {
+            '"' => quoted.push_str("\\\""),
+            '\\' => quoted.push_str("\\\\"),
+            '\n' => quoted.push_str("\\n"),
+            '\r' => quoted.push_str("\\r"),
+            '\u{2028}' => quoted.push_str("\\u2028"),
+            '\u{2029}' => quoted.push_str("\\u2029"),
+            c => quoted.push(c),
+        }
+    }
+    quoted.push('"');
+    quoted
+}
 
 fn prepare_members(
     d: &DirectiveData,
@@ -3139,6 +3464,23 @@ fn prepare_members(
                 // locate, which would splice a malformed `: ;` member.
                 if !i.is_signal {
                     use std::fmt::Write;
+                    let invalid_site = d
+                        .input_transforms
+                        .iter()
+                        .find(|site| site.input == i.name && site.is_invalid());
+                    if let Some(site) = invalid_site {
+                        if !site.conflicting_coercion {
+                            let _ = writeln!(
+                                prepared.coercion_members,
+                                "{NG_ACCEPT_INPUT_TYPE_PREFIX}{}: unknown;",
+                                coercion_member_key(&i.name)
+                            );
+                        }
+                        prepared
+                            .inputs
+                            .push(i.to_wire(source_text, converter, false));
+                        continue;
+                    }
                     match &i.transform {
                         Some(TransformData::Type { type_span, .. }) if !type_span.is_empty() => {
                             let type_str =
@@ -3146,7 +3488,7 @@ fn prepare_members(
                             let _ = writeln!(
                                 prepared.coercion_members,
                                 "{NG_ACCEPT_INPUT_TYPE_PREFIX}{}: {type_str};",
-                                i.name
+                                coercion_member_key(&i.name)
                             );
                         }
                         Some(TransformData::Expression(span)) if !span.is_empty() => {
@@ -3154,7 +3496,7 @@ fn prepare_members(
                             let _ = writeln!(
                                 prepared.coercion_members,
                                 "{NG_ACCEPT_INPUT_TYPE_PREFIX}{}: Parameters<typeof {expr_str}>[0];",
-                                i.name
+                                coercion_member_key(&i.name)
                             );
                         }
                         _ => {}
@@ -4144,6 +4486,7 @@ impl ClassData {
                 }),
             declaring_ng_module,
             is_jit: c.directive.is_jit,
+            is_poisoned: c.is_poisoned,
         })
     }
 }

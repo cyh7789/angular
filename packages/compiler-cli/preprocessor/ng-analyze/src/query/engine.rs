@@ -52,6 +52,8 @@ pub struct QueryEngine<Fs: ResourceResolverFs + Clone + 'static> {
     pub compile_non_exported_classes: bool,
     pub enable_hmr: bool,
     pub strict_standalone: bool,
+    pub use_poisoned_data: bool,
+    pub strict_injection_parameters: bool,
 }
 
 impl<Fs: ResourceResolverFs + Clone + 'static> QueryEngine<Fs> {
@@ -72,6 +74,8 @@ impl<Fs: ResourceResolverFs + Clone + 'static> QueryEngine<Fs> {
             true,
             false,
             false,
+            false,
+            false,
         )
     }
 
@@ -86,6 +90,8 @@ impl<Fs: ResourceResolverFs + Clone + 'static> QueryEngine<Fs> {
         compile_non_exported_classes: bool,
         enable_hmr: bool,
         strict_standalone: bool,
+        use_poisoned_data: bool,
+        strict_injection_parameters: bool,
     ) -> Arc<Self> {
         Arc::new(Self {
             fs,
@@ -101,6 +107,8 @@ impl<Fs: ResourceResolverFs + Clone + 'static> QueryEngine<Fs> {
             compile_non_exported_classes,
             enable_hmr,
             strict_standalone,
+            use_poisoned_data,
+            strict_injection_parameters,
         })
     }
 
@@ -120,7 +128,14 @@ impl<Fs: ResourceResolverFs + Clone + 'static> QueryEngine<Fs> {
     }
 
     pub fn intern_path(&self, path: impl AsRef<Path>) -> FileId {
-        self.interner.intern_path(path)
+        let path = path.as_ref();
+        if let Some(id) = self.interner.get_if_interned(path) {
+            return id;
+        }
+        match self.fs.resolve_root_dirs_backing_path(path) {
+            Some(backing) => self.interner.intern_path(backing),
+            None => self.interner.intern_path(path),
+        }
     }
 
     pub fn validation_context(
@@ -130,6 +145,7 @@ impl<Fs: ResourceResolverFs + Clone + 'static> QueryEngine<Fs> {
         crate::analyzer::ValidationContext {
             mode,
             strict_standalone: self.strict_standalone,
+            strict_injection_parameters: self.strict_injection_parameters,
         }
     }
 
@@ -153,7 +169,12 @@ impl<Fs: ResourceResolverFs + Clone + 'static> QueryEngine<Fs> {
     /// `SharedQuery` clones also cancels any still-running tasks for those keys. The component
     /// mapping is a whole-program singleton, so it is always dropped. Returns the list of evicted keys.
     pub fn invalidate_file(&self, path: &Path) -> Vec<QueryKey> {
-        let Some(file_id) = self.interner.get_if_interned(path) else {
+        let file_id = self.interner.get_if_interned(path).or_else(|| {
+            self.fs
+                .resolve_root_dirs_backing_path(path)
+                .and_then(|backing| self.interner.get_if_interned(backing))
+        });
+        let Some(file_id) = file_id else {
             return Vec::new();
         };
         self.invalidate_file_id(file_id)
@@ -173,6 +194,7 @@ impl<Fs: ResourceResolverFs + Clone + 'static> QueryEngine<Fs> {
 
         // TODO(parity): avoid evicting ComponentMapping on changes that do not affect @Component/@NgModule declarations.
         evicted_keys.insert(QueryKey::ComponentMapping);
+        evicted_keys.insert(QueryKey::NgModuleScopeRegistry);
         // `ProgramFiles` also reads the unrecorded tsconfig root list, so evict it on any change.
         evicted_keys.insert(QueryKey::ProgramFiles);
 
@@ -224,6 +246,9 @@ impl<Fs: ResourceResolverFs + Clone + 'static> QueryEngine<Fs> {
                 )),
                 QueryKey::ComponentMapping => Arc::new(QueryValue::ComponentMap(
                     self.component_mapping_body(&child_ctx).await,
+                )),
+                QueryKey::NgModuleScopeRegistry => Arc::new(QueryValue::ScopeRegistry(
+                    self.ngmodule_scope_registry_body(&child_ctx).await,
                 )),
                 QueryKey::ProgramFiles => Arc::new(QueryValue::ProgramFiles(
                     self.program_files_body(&child_ctx).await,
@@ -420,6 +445,7 @@ impl<Fs: ResourceResolverFs + Clone + 'static> QueryEngine<Fs> {
                 class_index: Arc::new(class_index),
                 symbol_index: Arc::new(symbol_index),
                 di_facts: Arc::new(crate::analyzer::di_facts::index_di_facts(result.di_facts)),
+                function_facts: Arc::new(result.function_facts),
                 file_exports: Arc::new(result.exports),
                 errors: dep.errors.clone(),
                 diagnostics: Vec::new(),
@@ -483,6 +509,7 @@ impl<Fs: ResourceResolverFs + Clone + 'static> QueryEngine<Fs> {
             class_index: Arc::new(class_index),
             symbol_index: Arc::new(symbol_index),
             di_facts: Arc::new(crate::analyzer::di_facts::index_di_facts(analysis.di_facts)),
+            function_facts: Arc::new(analysis.function_facts),
             file_exports: Arc::new(analysis.file_exports),
             errors: dep.errors.clone(),
             diagnostics: analysis.diagnostics,
@@ -796,6 +823,7 @@ impl<Fs: ResourceResolverFs + Clone + 'static> QueryEngine<Fs> {
         mut local_result: FileData,
         ctx: &QueryContext<Fs>,
     ) -> Arc<FileData> {
+        let function_facts = local_result.function_facts.clone();
         for class in &mut local_result.classes {
             let reference_id = class.reference_id;
             let class_name = class.class_name.clone();
@@ -816,14 +844,23 @@ impl<Fs: ResourceResolverFs + Clone + 'static> QueryEngine<Fs> {
             class.di_issues = class.inherited_ctor_issues(own_facts, ctx).await;
             let provider_issues = class.undecorated_provider_issues(ctx).await;
             class.di_issues.extend(provider_issues);
+            if let Some(directive) = class.directive_part_mut() {
+                for site in &mut directive.input_transforms {
+                    site.resolve_issue(&function_facts, &file_path, ctx).await;
+                }
+            }
 
             if let Some(ref mut params) = class.constructor_params {
-                for param in params {
+                for (index, param) in params.iter_mut().enumerate() {
                     // Skip parameters already classified by the in-file pass; re-chasing is wrong:
                     // `import type {X}` has no runtime value even if X is a class, and the chase
                     // checks exports before root bindings (`export { Foo } from './iface'; class
                     // Foo {}` would resolve to the interface).
-                    if param.is_type_only || param.is_value_verified {
+                    let di_is_type_only = class
+                        .ctor_params_di
+                        .get(index)
+                        .is_some_and(|di| di.type_info.is_type_only());
+                    if di_is_type_only || param.is_value_verified {
                         continue;
                     }
                     if let Some(ref type_name) = param.type_name {
@@ -836,8 +873,20 @@ impl<Fs: ResourceResolverFs + Clone + 'static> QueryEngine<Fs> {
                         )
                         .await
                         {
-                            SymbolValueKind::TypeOnly => param.is_type_only = true,
-                            SymbolValueKind::Value => param.is_value_verified = true,
+                            SymbolValueKind::TypeOnly => {
+                                param.is_type_only = true;
+                                if let Some(di) = class.ctor_params_di.get_mut(index) {
+                                    di.type_info = crate::analyzer::TypeRefInfo::unavailable(
+                                        crate::analyzer::UnavailableValue::NoValueDeclaration {
+                                            decl: None,
+                                        },
+                                    );
+                                }
+                            }
+                            SymbolValueKind::Value => {
+                                param.is_type_only = false;
+                                param.is_value_verified = true;
+                            }
                             // Emit optimistically with `@ts-ignore`.
                             SymbolValueKind::Unresolved => {}
                         }
@@ -869,6 +918,14 @@ impl<Fs: ResourceResolverFs + Clone + 'static> QueryEngine<Fs> {
                     directive.declaring_ng_module,
                     directive.duplicate_declaring_ng_modules,
                 ) = mapping.declaring_ng_modules(reference_id.file, class_name.as_deref());
+                directive.duplicate_declaration_context =
+                    crate::query::module_scope::duplicate_declaration_context(
+                        ctx,
+                        reference_id.file,
+                        class_name.as_deref().unwrap_or_default(),
+                        &directive.duplicate_declaring_ng_modules,
+                    )
+                    .await;
                 optimize_directive(
                     ctx,
                     &file_path,
@@ -883,6 +940,14 @@ impl<Fs: ResourceResolverFs + Clone + 'static> QueryEngine<Fs> {
                     pipe.declaring_ng_module,
                     pipe.duplicate_declaring_ng_modules,
                 ) = mapping.declaring_ng_modules(reference_id.file, class_name.as_deref());
+                pipe.duplicate_declaration_context =
+                    crate::query::module_scope::duplicate_declaration_context(
+                        ctx,
+                        reference_id.file,
+                        class_name.as_deref().unwrap_or_default(),
+                        &pipe.duplicate_declaring_ng_modules,
+                    )
+                    .await;
             }
             // Semantic invariant: no `Incomplete` survives into the semantic FileData.
             class.demote_resolved();
@@ -1163,6 +1228,36 @@ async fn resolve_qualified_symbol_value_kind<Fs: ResourceResolverFs + Clone + 's
     let file_id = ctx.engine.intern_path(&file_path);
     let syntax = ctx.analyze_file_syntax(file_id).await;
     let Some(specifier) = find_namespace_import_specifier(&syntax, ns_prefix) else {
+        for decl in &syntax.import_declarations {
+            for binding in &decl.bindings {
+                if binding.local == ns_prefix && !binding.is_type {
+                    if let Some(imported_ns) = binding.imported.as_deref() {
+                        if let Some(target_file) =
+                            crate::evaluator::cross_file::resolve_specifier(
+                                ctx.engine.resolver.as_ref(),
+                                &file_path,
+                                &decl.specifier,
+                            )
+                        {
+                            let full_member = if imported_ns == "default" {
+                                member_name.to_string()
+                            } else {
+                                format!("{imported_ns}.{member_name}")
+                            };
+                            if let Some(kind) = resolve_export_equals_namespace_member(
+                                &target_file,
+                                &full_member,
+                                ctx,
+                            )
+                            .await
+                            {
+                                return kind;
+                            }
+                        }
+                    }
+                }
+            }
+        }
         return SymbolValueKind::Unresolved;
     };
 
@@ -1179,10 +1274,18 @@ async fn resolve_qualified_symbol_value_kind<Fs: ResourceResolverFs + Clone + 's
         if namespace_is_type_only(&target_file, inner_ns, ctx).await {
             return SymbolValueKind::Unresolved;
         }
-        return resolve_symbol_value_kind(member_name.to_string(), target_file, ctx, visited).await;
+        let kind =
+            resolve_symbol_value_kind(member_name.to_string(), target_file.clone(), ctx, visited)
+                .await;
+        if kind != SymbolValueKind::Unresolved {
+            return kind;
+        }
+        return resolve_export_equals_namespace_member(&target_file, member_name, ctx)
+            .await
+            .unwrap_or(SymbolValueKind::Unresolved);
     }
 
-    let Ok(decl_sym) = crate::evaluator::cross_file::cross_file_resolve(
+    if let Ok(decl_sym) = crate::evaluator::cross_file::cross_file_resolve(
         ctx,
         &file_path,
         Some(specifier),
@@ -1190,10 +1293,177 @@ async fn resolve_qualified_symbol_value_kind<Fs: ResourceResolverFs + Clone + 's
         visited,
     )
     .await
-    else {
+    {
+        let kind = classify_declaration(decl_sym, &file_path, ctx).await;
+        if kind != SymbolValueKind::Unresolved {
+            return kind;
+        }
+    }
+
+    // Fallback for CommonJS / Closure `declare namespace foo { ... } export = foo;` ambient `.d.ts`
+    // modules where `cross_file_resolve` returns `Ok(None)` because it only tracks ES module exports.
+    let Some(target_file) = crate::evaluator::cross_file::resolve_specifier(
+        ctx.engine.resolver.as_ref(),
+        &file_path,
+        specifier,
+    ) else {
         return SymbolValueKind::Unresolved;
     };
-    classify_declaration(decl_sym, &file_path, ctx).await
+    resolve_export_equals_namespace_member(&target_file, member_name, ctx)
+        .await
+        .unwrap_or(SymbolValueKind::Unresolved)
+}
+
+fn extract_dotted_identifier_path(expr: &oxc_ast::ast::Expression<'_>) -> Option<String> {
+    match expr {
+        oxc_ast::ast::Expression::Identifier(id) => Some(id.name.to_string()),
+        oxc_ast::ast::Expression::StaticMemberExpression(member) => {
+            let prefix = extract_dotted_identifier_path(&member.object)?;
+            Some(format!("{prefix}.{}", member.property.name))
+        }
+        _ => None,
+    }
+}
+
+/// Resolves a member inside a `declare namespace N { ... } export = N;` ambient `.d.ts` file.
+async fn resolve_export_equals_namespace_member<Fs: ResourceResolverFs + Clone + 'static>(
+    target_file: &Path,
+    member_path: &str,
+    ctx: &QueryContext<Fs>,
+) -> Option<SymbolValueKind> {
+    use oxc_syntax::symbol::SymbolFlags;
+
+    let file_id = ctx.engine.intern_path(target_file);
+    let parsed = ctx.parse_file(file_id).await;
+    let guard = parsed.lock().unwrap();
+    let dep = guard.borrow_dependent();
+
+    let export_equals_path = dep.program.body.iter().find_map(|stmt| match stmt {
+        oxc_ast::ast::Statement::TSExportAssignment(assign) => {
+            extract_dotted_identifier_path(&assign.expression)
+        }
+        _ => None,
+    });
+
+    let segments: Vec<&str> = member_path.split('.').collect();
+    let (&leaf_name, member_ns_prefix) = segments.split_last()?;
+
+    let mut candidate_ns_paths: Vec<Vec<&str>> = Vec::new();
+    if let Some(eq_path) = export_equals_path.as_deref() {
+        let mut full_ns: Vec<&str> = eq_path.split('.').collect();
+        full_ns.extend_from_slice(member_ns_prefix);
+        candidate_ns_paths.push(full_ns);
+    }
+    if !member_ns_prefix.is_empty() {
+        candidate_ns_paths.push(member_ns_prefix.to_vec());
+    }
+
+    let scoping = dep.semantic.scoping();
+    for ns_path in candidate_ns_paths {
+        let mut scopes = Vec::new();
+        let mut has_import_equals = false;
+        collect_namespace_scopes(
+            &dep.program.body,
+            &ns_path,
+            &mut scopes,
+            &mut has_import_equals,
+        );
+        let mut combined_flags = SymbolFlags::empty();
+        let mut found_any = false;
+        for scope_id in scopes {
+            if let Some(symbol_id) = scoping.get_binding(scope_id, leaf_name.into()) {
+                combined_flags |= scoping.symbol_flags(symbol_id);
+                found_any = true;
+            }
+        }
+        if found_any {
+            if combined_flags.intersects(SymbolFlags::Value)
+                && !combined_flags.contains(SymbolFlags::ConstEnum)
+            {
+                return Some(SymbolValueKind::Value);
+            }
+            if !has_import_equals
+                && combined_flags.intersects(
+                    SymbolFlags::Interface
+                        | SymbolFlags::TypeAlias
+                        | SymbolFlags::TypeParameter
+                        | SymbolFlags::ConstEnum,
+                )
+            {
+                return Some(SymbolValueKind::TypeOnly);
+            }
+        }
+    }
+    None
+}
+
+fn collect_namespace_scopes<'a>(
+    stmts: &'a [oxc_ast::ast::Statement<'a>],
+    path: &[&str],
+    out: &mut Vec<oxc_syntax::scope::ScopeId>,
+    has_import_equals: &mut bool,
+) {
+    let Some((&first, rest)) = path.split_first() else {
+        return;
+    };
+    for stmt in stmts {
+        let decl = match stmt {
+            oxc_ast::ast::Statement::TSNamespaceDeclaration(decl) => decl.as_ref(),
+            oxc_ast::ast::Statement::ExportDeclaration(export) => {
+                if let oxc_ast::ast::Declaration::TSNamespaceDeclaration(decl) = &export.declaration
+                {
+                    decl.as_ref()
+                } else {
+                    continue;
+                }
+            }
+            _ => continue,
+        };
+        collect_from_namespace_decl(decl, first, rest, out, has_import_equals);
+    }
+}
+
+fn collect_from_namespace_decl<'a>(
+    decl: &'a oxc_ast::ast::TSNamespaceDeclaration<'a>,
+    expected_name: &str,
+    rest: &[&str],
+    out: &mut Vec<oxc_syntax::scope::ScopeId>,
+    has_import_equals: &mut bool,
+) {
+    if decl.id.name.as_str() != expected_name {
+        return;
+    }
+    match (&decl.body, rest.split_first()) {
+        (body, None) => {
+            if let Some(scope_id) = decl.scope_id.get() {
+                out.push(scope_id);
+            }
+            if let oxc_ast::ast::TSNamespaceDeclarationBody::TSModuleBlock(block) = body {
+                if block.body.iter().any(|stmt| {
+                    matches!(stmt, oxc_ast::ast::Statement::TSImportEqualsDeclaration(_))
+                        || matches!(
+                            stmt,
+                            oxc_ast::ast::Statement::ExportDeclaration(export)
+                                if matches!(
+                                    export.declaration,
+                                    oxc_ast::ast::Declaration::TSImportEqualsDeclaration(_)
+                                )
+                        )
+                }) {
+                    *has_import_equals = true;
+                }
+            }
+        }
+        (
+            oxc_ast::ast::TSNamespaceDeclarationBody::TSNamespaceDeclaration(inner),
+            Some((&next, tail)),
+        ) => {
+            collect_from_namespace_decl(inner, next, tail, out, has_import_equals);
+        }
+        (oxc_ast::ast::TSNamespaceDeclarationBody::TSModuleBlock(block), Some(_)) => {
+            collect_namespace_scopes(&block.body, rest, out, has_import_equals);
+        }
+    }
 }
 #[cfg(test)]
 mod tests {
@@ -1201,6 +1471,47 @@ mod tests {
     use crate::test_utils::create_test_fs;
     use oxc_resolver::ResolveOptions;
     use std::path::Path;
+    
+    #[test]
+    fn test_intern_path_canonicalizes_root_dirs_paths() {
+        for merged_first in [false, true] {
+            let fs = create_test_fs(&[(
+                "/project/out-dir/pkg/index.d.ts",
+                "export declare class Lib {}",
+            )]);
+            fs.set_root_dirs(vec![
+                PathBuf::from("/project"),
+                PathBuf::from("/project/out-dir"),
+            ]);
+            let resolver = Arc::new(ResolverGeneric::new_with_file_system(
+                fs.clone(),
+                ResolveOptions::default(),
+            ));
+            let engine = QueryEngine::new_default(
+                fs,
+                resolver,
+                Arc::new(ResourceRegistry::default()),
+                Arc::new(std::sync::RwLock::new(Vec::new())),
+            );
+
+            let merged = Path::new("/project/pkg/index.d.ts");
+            let backing = Path::new("/project/out-dir/pkg/index.d.ts");
+            let (merged_id, backing_id) = if merged_first {
+                let merged_id = engine.intern_path(merged);
+                (merged_id, engine.intern_path(backing))
+            } else {
+                let backing_id = engine.intern_path(backing);
+                (engine.intern_path(merged), backing_id)
+            };
+
+            assert_eq!(merged_id, backing_id, "merged_first={merged_first}");
+            assert_eq!(
+                engine.lookup_path(merged_id),
+                PathBuf::from("/project/out-dir/pkg/index.d.ts"),
+                "merged_first={merged_first}"
+            );
+        }
+    }
 
     #[test]
     fn test_query_context_chaining_inheritance() {

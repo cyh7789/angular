@@ -176,6 +176,8 @@ export class SidecarAnalyzer implements IAnalyzer {
       workspaceName?: string;
       rootDirs?: string[];
       enableHmr?: boolean;
+      usePoisonedData?: boolean;
+      useHostForImportGeneration?: boolean;
     },
   ): Promise<void> {
     await this.callRpc('initialize', {
@@ -187,6 +189,8 @@ export class SidecarAnalyzer implements IAnalyzer {
       workspaceName: options?.workspaceName,
       rootDirs: options?.rootDirs,
       enableHmr: options?.enableHmr,
+      usePoisonedData: options?.usePoisonedData,
+      useHostForImportGeneration: options?.useHostForImportGeneration,
     });
   }
 

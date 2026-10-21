@@ -138,12 +138,19 @@ impl<'a, Fs: ResourceResolverFs> ClassVisitor<'a, Fs> {
 
         let reference_id = ReferenceId::new(self.file_id, symbol_id);
         let super_class = evaluate_super_class(class, &eval);
+        let ctor_params_di = super::constructor_params_di(
+            class,
+            self.semantic,
+            self.import_map,
+            self.angular_imports,
+        );
         self.di_facts.extend(super::di_facts::ts_class_di_facts(
             class,
             reference_id,
             self.semantic,
             self.angular_imports,
             super_class.clone(),
+            ctor_params_di.as_deref(),
         ));
 
         if class.decorators.is_empty() {
@@ -176,6 +183,7 @@ impl<'a, Fs: ResourceResolverFs> ClassVisitor<'a, Fs> {
             &eval,
             self.enable_hmr,
             super_class,
+            ctor_params_di.unwrap_or_default(),
         ) else {
             return;
         };
@@ -283,6 +291,11 @@ fn populate_directive_members(
     }
     d.bind_metadata_fields_to_members(&members.members);
     d.io_issues.extend(members.io_issues);
+    d.input_transforms.extend(members.transform_sites);
+    for site in &mut d.input_transforms {
+        let coercion_member = format!("ngAcceptInputType_{}", site.input);
+        site.conflicting_coercion = members.static_members.contains(&coercion_member);
+    }
     if !members.pending_options.is_empty() || d.evaluated_io.is_some() {
         let pending = d.evaluated_io.get_or_insert_with(Default::default);
         pending.member_options = members.pending_options;
@@ -353,6 +366,8 @@ fn classify(reference_id: ReferenceId, parsed: ParsedClass, has_real_symbol: boo
         name_span: common.name_span,
         class_name: common.class_name,
         constructor_params: common.constructor_params,
+        ctor_params_di: common.ctor_params_di,
+        is_abstract: common.is_abstract,
         unexpected_param_decorators: common.unexpected_param_decorators,
         decorator_issues: common.decorator_issues,
         di_issues: Vec::new(),
@@ -439,6 +454,8 @@ struct ParsedCommon {
     name_span: Option<oxc_span::Span>,
     class_name: Option<String>,
     constructor_params: Option<Vec<ConstructorParamMetadata>>,
+    ctor_params_di: Vec<super::CtorParamDi>,
+    is_abstract: bool,
     unexpected_param_decorators: Vec<crate::analyzer::UnexpectedParamDecorator>,
     decorator_issues: Vec<crate::analyzer::class_data::ValueIssue>,
     member_decorators: Vec<crate::DecoratedMemberMetadata>,
@@ -460,6 +477,8 @@ struct ParsedCommon {
 /// classifications, matching the internal data model).
 struct ParsedMembers {
     fields: Vec<AngularField>,
+    transform_sites: Vec<super::transforms::InputTransformSite>,
+    static_members: Vec<String>,
     /// The class members an `inputs`/`outputs` entry may bind to.
     members: Vec<crate::analyzer::evaluated_io::ClassMemberFacts>,
     /// `@Input`/`@Output` arguments still waiting on constants from other files.
@@ -512,6 +531,7 @@ fn process_class_common<'a, Fs: ResourceResolverFs>(
     eval: &crate::evaluator::EvalInput<'a, '_>,
     enable_hmr: bool,
     super_class: Option<crate::DeclarationTuple>,
+    ctor_params_di: Vec<super::CtorParamDi>,
 ) -> Option<ParsedClass> {
     let class_name = class.id.as_ref().map(|id| id.name.to_string());
     let name_span = class.id.as_ref().map(|id| id.span);
@@ -521,6 +541,7 @@ fn process_class_common<'a, Fs: ResourceResolverFs>(
     });
     let constructor_params_result = get_constructor_params(
         class,
+        &ctor_params_di,
         semantic,
         converter,
         import_map,
@@ -708,6 +729,8 @@ fn process_class_common<'a, Fs: ResourceResolverFs>(
             name_span,
             class_name,
             constructor_params,
+            ctor_params_di,
+            is_abstract: class.r#abstract,
             unexpected_param_decorators,
             decorator_issues,
             member_decorators,
@@ -729,6 +752,8 @@ fn process_class_common<'a, Fs: ResourceResolverFs>(
             members: member_io.members,
             pending_options: member_io.pending_options,
             io_issues: member_io.issues,
+            transform_sites: member_io.transform_sites,
+            static_members: member_io.static_members,
             host_bindings,
             host_listeners,
         },
@@ -832,6 +857,8 @@ pub struct ParsedFileAnalysis {
     pub registrations: Vec<RegistrationInfo>,
     /// Constructor facts for every class in the file, decorated or not.
     pub di_facts: Vec<super::di_facts::ClassDiFacts>,
+    /// Facts for the top-level function declarations, by name.
+    pub function_facts: std::collections::HashMap<String, super::transforms::FunctionFacts>,
     pub file_exports: FileExportInfo,
     pub imports_end: u32,
     /// The file's static `import` declarations, in source order. Drives import removal for
@@ -922,8 +949,10 @@ pub fn analyze_parsed<Fs: ResourceResolverFs>(
         &dependency_array_references(&output.classes),
     );
     let type_only_exports = get_type_only_exports(module_record, semantic);
-    let static_dependencies = super::imports::extract_imports(module_record);
-    let dynamic_dependencies = super::imports::extract_dynamic_imports(semantic);
+    let (static_dependencies, type_only_static_dependencies) =
+        super::imports::extract_imports(module_record, program);
+    let mut dynamic_dependencies = type_only_static_dependencies;
+    dynamic_dependencies.extend(super::imports::extract_dynamic_imports(semantic));
     let signal_debug_names =
         super::signal_debug_name::collect_signal_debug_names(program, semantic, source_text);
     let top_level_value_bindings = enable_hmr.then(|| super::top_level_value_bindings(semantic));
@@ -932,6 +961,7 @@ pub fn analyze_parsed<Fs: ResourceResolverFs>(
         classes: output.classes,
         registrations: output.registrations,
         di_facts: output.di_facts,
+        function_facts: super::transforms::collect_function_facts(program, semantic),
         file_exports: output.file_exports,
         imports_end,
         import_declarations,

@@ -1462,6 +1462,108 @@ fn test_dts_root_files_are_not_compiled() {
     }
 }
 
+fn analyze_app_module_importing_non_class(
+    extra_files: &[(&str, &str)],
+    import_source: &str,
+) -> AnalysisResult {
+    let mut virtual_files = HashMap::new();
+    virtual_files.insert(
+        "/project/tsconfig.json".to_string(),
+        r#"{"files": ["app.ts"]}"#.to_string(),
+    );
+    virtual_files.insert(
+        "/project/app.ts".to_string(),
+        format!(
+            r#"
+            import {{NgModule}} from '@angular/core';
+            import {{NotAClass}} from '{import_source}';
+
+            @NgModule({{imports: [NotAClass]}})
+            export class AppModule {{}}
+        "#
+        ),
+    );
+    for (path, content) in extra_files {
+        virtual_files.insert(path.to_string(), content.to_string());
+    }
+    let analyzer = Analyzer::new(AnalyzerOptions {
+        tsconfig_path: "/project/tsconfig.json".to_string(),
+        optimize: Some(true),
+        virtual_files: Some(virtual_files),
+        ..Default::default()
+    })
+    .unwrap();
+    analyzer
+        .get_metadata_for_file("/project/app.ts".to_string())
+        .expect("app.ts metadata")
+}
+
+fn app_module_scope_failed(meta: &AnalysisResult) -> bool {
+    let ng_module = meta
+        .classes
+        .iter()
+        .find(|c| c.class_name.as_deref() == Some("AppModule"))
+        .and_then(|c| c.ng_module.as_ref())
+        .expect("AppModule ng_module");
+    ng_module.imports.is_none()
+}
+
+#[test]
+fn test_ngmodule_non_class_reference_from_dts_reports_ng1010_on_dts() {
+    let decl = "export declare const NotAClass: unknown;\n";
+    let meta = analyze_app_module_importing_non_class(&[("/project/decl.d.ts", decl)], "./decl");
+
+    assert!(
+        app_module_scope_failed(&meta),
+        "AppModule analysis must fail"
+    );
+    let ng1010: Vec<_> = meta.diagnostics.iter().filter(|d| d.code == 1010).collect();
+    assert_eq!(ng1010.len(), 1, "{:?}", meta.diagnostics);
+    let diag = ng1010[0];
+    assert_eq!(diag.file_path.as_deref(), Some("/project/decl.d.ts"));
+    assert_eq!(
+        diag.message_text,
+        "Value at position 0 in the NgModule.imports of AppModule is not a class\n  \
+         Value is a reference to 'NotAClass'."
+    );
+    let start = decl.find("NotAClass").unwrap() as u32;
+    let span = diag.span.as_ref().expect("NG1010 span");
+    assert_eq!(
+        (span.start, span.end),
+        (start, start + "NotAClass".len() as u32)
+    );
+}
+
+/// The same mistake with a declaration in a source file of the compilation is still NG1010,
+/// reported on that declaration. (A function, since a `const` with an initializer evaluates to its
+/// value rather than to a reference.)
+#[test]
+fn test_ngmodule_non_class_reference_from_source_reports_ng1010() {
+    let consts = "export function NotAClass() {}\n";
+    let meta =
+        analyze_app_module_importing_non_class(&[("/project/consts.ts", consts)], "./consts");
+
+    assert!(
+        app_module_scope_failed(&meta),
+        "AppModule analysis must fail"
+    );
+    let ng1010: Vec<_> = meta.diagnostics.iter().filter(|d| d.code == 1010).collect();
+    assert_eq!(ng1010.len(), 1, "{:?}", meta.diagnostics);
+    let diag = ng1010[0];
+    assert_eq!(diag.file_path.as_deref(), Some("/project/consts.ts"));
+    assert_eq!(
+        diag.message_text,
+        "Value at position 0 in the NgModule.imports of AppModule is not a class\n  \
+         Value is a reference to 'NotAClass'."
+    );
+    let start = consts.find("NotAClass").unwrap() as u32;
+    let span = diag.span.as_ref().expect("NG1010 span");
+    assert_eq!(
+        (span.start, span.end),
+        (start, start + "NotAClass".len() as u32)
+    );
+}
+
 #[test]
 fn test_resource_files_in_entrypoints_and_metadata() {
     let mut virtual_files = HashMap::new();
@@ -3858,6 +3960,7 @@ fn test_compilation_chunk_with_prefix_imports_and_cycles() {
         virtual_files: Some(virtual_files),
         workspace_name: Some("google3".to_string()),
         root_dirs: Some(vec!["/project".to_string()]),
+        use_host_for_import_generation: Some(true),
         ..Default::default()
     };
 
@@ -3888,6 +3991,124 @@ fn test_compilation_chunk_with_prefix_imports_and_cycles() {
     assert!(file_paths.contains(&"/project/app.module.ts"));
     assert!(file_paths.contains(&"/project/a.component.ts"));
     assert!(file_paths.contains(&"/project/b.component.ts"));
+}
+
+/// A component in one file using a directive declared in another, through an NgModule, so the
+/// component's `resolvedDeclarations` has to import the directive. `tsconfig_extra` is spliced
+/// into `angularCompilerOptions`.
+fn cross_file_import_project(tsconfig_extra: &str) -> HashMap<String, String> {
+    [
+        (
+            "/project/tsconfig.json",
+            format!(
+                r#"{{"compilerOptions": {{"rootDirs": ["/project"]}},
+                    "angularCompilerOptions": {{"workspaceName": "google3"{tsconfig_extra}}},
+                    "files": ["app.module.ts", "cmp.ts", "dir.ts"]}}"#
+            ),
+        ),
+        (
+            "/project/dir.ts",
+            "import {Directive} from '@angular/core';\n\
+             @Directive({selector: '[test]', standalone: false})\n\
+             export class TestDir {}\n"
+                .to_string(),
+        ),
+        (
+            "/project/cmp.ts",
+            "import {Component} from '@angular/core';\n\
+             @Component({selector: 'cmp', template: '<div test></div>', standalone: false})\n\
+             export class Cmp {}\n"
+                .to_string(),
+        ),
+        (
+            "/project/app.module.ts",
+            "import {NgModule} from '@angular/core';\n\
+             import {Cmp} from './cmp';\n\
+             import {TestDir} from './dir';\n\
+             @NgModule({declarations: [Cmp, TestDir]})\n\
+             export class AppModule {}\n"
+                .to_string(),
+        ),
+    ]
+    .into_iter()
+    .map(|(path, content)| (path.to_string(), content))
+    .collect()
+}
+
+/// The specifier `cmp.ts` imports `TestDir` with, under `options`.
+fn test_dir_import_specifier(options: AnalyzerOptions) -> String {
+    let analyzer = Analyzer::new(options).unwrap();
+    let meta = analyzer
+        .get_metadata_for_file("/project/cmp.ts".to_string())
+        .expect("cmp.ts metadata");
+    let component = meta.classes[0].component.as_ref().expect("component");
+    let decl = component
+        .resolved_declarations
+        .as_ref()
+        .expect("resolved declarations")
+        .iter()
+        .find(|d| d.name == "TestDir")
+        .expect("TestDir in scope");
+    decl.r#ref
+        .consumer_import
+        .as_ref()
+        .expect("TestDir is imported")
+        .specifier
+        .clone()
+}
+
+/// `_useHostForImportGeneration` switches module naming to the host's scheme, which the
+/// analyzer stands in for with `workspaceName` + `rootDirs` (ngtsc's `UnifiedModulesStrategy`).
+#[test]
+fn test_use_host_for_import_generation_emits_prefixed_specifiers() {
+    // The flag passed as an option.
+    let specifier = test_dir_import_specifier(AnalyzerOptions {
+        tsconfig_path: "/project/tsconfig.json".to_string(),
+        optimize: Some(true),
+        virtual_files: Some(cross_file_import_project("")),
+        use_host_for_import_generation: Some(true),
+        ..Default::default()
+    });
+    assert_eq!(specifier, "google3/dir");
+
+    // The flag read from the tsconfig, in either spelling.
+    for flag in [
+        "_useHostForImportGeneration",
+        "_useHostForImportAndAliasGeneration",
+    ] {
+        let specifier = test_dir_import_specifier(AnalyzerOptions {
+            tsconfig_path: "/project/tsconfig.json".to_string(),
+            optimize: Some(true),
+            virtual_files: Some(cross_file_import_project(&format!(", \"{flag}\": true"))),
+            ..Default::default()
+        });
+        assert_eq!(specifier, "google3/dir", "{flag}");
+    }
+}
+
+/// Without the flag a `workspaceName` is inert and imports stay relative, as in ngtsc where
+/// Bazel's `bazelOptions.workspaceName` is present but the host's module naming is not used.
+#[test]
+fn test_workspace_name_without_use_host_flag_emits_relative_specifiers() {
+    for options in [
+        AnalyzerOptions {
+            tsconfig_path: "/project/tsconfig.json".to_string(),
+            optimize: Some(true),
+            virtual_files: Some(cross_file_import_project("")),
+            ..Default::default()
+        },
+        AnalyzerOptions {
+            tsconfig_path: "/project/tsconfig.json".to_string(),
+            optimize: Some(true),
+            virtual_files: Some(cross_file_import_project("")),
+            workspace_name: Some("google3".to_string()),
+            root_dirs: Some(vec!["/project".to_string()]),
+            use_host_for_import_generation: Some(false),
+            ..Default::default()
+        },
+    ] {
+        assert_eq!(test_dir_import_specifier(options), "./dir");
+    }
 }
 
 #[test]
@@ -6398,4 +6619,649 @@ fn test_instance_io_not_clobbered_by_same_named_static_member() {
         .map(|o| o.name.as_str())
         .collect();
     assert_eq!(outputs, vec!["bar", "qux"]);
+}
+
+#[test]
+fn test_use_poisoned_data_populates_poisoned_component_scope_and_schemas() {
+    let app_source = r#"
+        import { Component, Directive } from '@angular/core';
+
+        @Directive({ selector: '[valid-dir]', standalone: false })
+        export class ValidDir {}
+
+        @Directive({ selector: '[valid-standalone]' })
+        export class ValidStandaloneDir {}
+
+        @Component({ selector: 'standalone-in-decl', template: '' })
+        export class StandaloneInDecl {}
+
+        @Component({ selector: 'non-standalone-cmp', standalone: false, template: '' })
+        export class NonStandaloneComp {}
+
+        @Component({
+            selector: 'poisoned-standalone',
+            imports: [ValidStandaloneDir, ValidDir],
+            template: '',
+        })
+        export class PoisonedStandaloneComp {}
+    "#;
+    let mod_source = r#"
+        import { CUSTOM_ELEMENTS_SCHEMA, NgModule } from '@angular/core';
+        import { NonStandaloneComp, ValidDir, StandaloneInDecl } from './app';
+
+        @NgModule({
+            declarations: [NonStandaloneComp, ValidDir, StandaloneInDecl],
+            schemas: [CUSTOM_ELEMENTS_SCHEMA],
+        })
+        export class PoisonedModule {}
+    "#;
+
+    let analyze_with = |use_poisoned_data: bool| {
+        let mut virtual_files = HashMap::new();
+        virtual_files.insert("/project/app.ts".to_string(), app_source.to_string());
+        virtual_files.insert("/project/mod.ts".to_string(), mod_source.to_string());
+        virtual_files.insert(
+            "/project/tsconfig.json".to_string(),
+            r#"{"files": ["app.ts", "mod.ts"]}"#.to_string(),
+        );
+        let analyzer = Analyzer::new(AnalyzerOptions {
+            tsconfig_path: "/project/tsconfig.json".to_string(),
+            optimize: Some(true),
+            virtual_files: Some(virtual_files),
+            use_poisoned_data: Some(use_poisoned_data),
+            ..Default::default()
+        })
+        .unwrap();
+        analyzer
+            .get_metadata_for_file("/project/app.ts".to_string())
+            .expect("app.ts metadata")
+    };
+
+    let without_poisoned = analyze_with(false);
+    let non_standalone_without = without_poisoned
+        .classes
+        .iter()
+        .find(|c| c.class_name.as_deref() == Some("NonStandaloneComp"))
+        .and_then(|c| c.component.as_ref())
+        .unwrap();
+    assert!(non_standalone_without.is_poisoned);
+    assert!(non_standalone_without
+        .resolved_declarations
+        .as_ref()
+        .unwrap()
+        .is_empty());
+    assert!(non_standalone_without.schemas.is_none());
+
+    let standalone_without = without_poisoned
+        .classes
+        .iter()
+        .find(|c| c.class_name.as_deref() == Some("PoisonedStandaloneComp"))
+        .and_then(|c| c.component.as_ref())
+        .unwrap();
+    assert!(standalone_without.is_poisoned);
+    assert!(standalone_without
+        .resolved_declarations
+        .as_ref()
+        .unwrap()
+        .is_empty());
+
+    let with_poisoned = analyze_with(true);
+    let non_standalone_with = with_poisoned
+        .classes
+        .iter()
+        .find(|c| c.class_name.as_deref() == Some("NonStandaloneComp"))
+        .and_then(|c| c.component.as_ref())
+        .unwrap();
+    assert!(non_standalone_with.is_poisoned);
+    let non_standalone_decls: Vec<&str> = non_standalone_with
+        .resolved_declarations
+        .as_ref()
+        .unwrap()
+        .iter()
+        .map(|d| d.name.as_str())
+        .collect();
+    assert_eq!(
+        non_standalone_decls,
+        vec!["NonStandaloneComp", "ValidDir", "StandaloneInDecl"]
+    );
+    assert_eq!(
+        non_standalone_with.schemas.as_deref(),
+        Some(&["CUSTOM_ELEMENTS_SCHEMA".to_string()][..])
+    );
+
+    let standalone_with = with_poisoned
+        .classes
+        .iter()
+        .find(|c| c.class_name.as_deref() == Some("PoisonedStandaloneComp"))
+        .and_then(|c| c.component.as_ref())
+        .unwrap();
+    assert!(standalone_with.is_poisoned);
+    let standalone_decls: Vec<&str> = standalone_with
+        .resolved_declarations
+        .as_ref()
+        .unwrap()
+        .iter()
+        .map(|d| d.name.as_str())
+        .collect();
+    assert_eq!(standalone_decls, vec!["ValidStandaloneDir", "ValidDir"]);
+}
+
+#[test]
+fn test_constructor_dependency_diagnostics() {
+    let types = r#"
+        export class TypeOnly {}
+        export interface Shape {}
+    "#;
+    let source = r#"
+        import { Component, Directive, Inject, Injectable } from '@angular/core';
+        import type { TypeOnly } from './types';
+        import * as Ns from './types';
+        import { Shape } from './types';
+
+        export interface Iface {}
+
+        @Injectable()
+        export class Primitive {
+            constructor(private notInjectable: string) {}
+        }
+        @Injectable({ providedIn: 'root' })
+        export class Interface {
+            constructor(param: Iface) {}
+        }
+        @Injectable()
+        export class TypeOnlyImport {
+            constructor(param: TypeOnly) {}
+        }
+        @Injectable()
+        export class Namespace {
+            constructor(param: Ns) {}
+        }
+        @Injectable()
+        export class Untyped {
+            constructor(param) {}
+        }
+        @Injectable()
+        export class ImportedInterface {
+            constructor(param: Shape) {}
+        }
+        @Injectable()
+        export class ExplicitToken {
+            constructor(@Inject('token') param: string) {}
+        }
+        @Injectable()
+        export abstract class AbstractService {
+            constructor(param: string) {}
+        }
+        @Injectable({ providedIn: 'root', useValue: 1 })
+        export class UseValue {
+            constructor(param: string) {}
+        }
+        @Component({ selector: 'cmp', template: '' })
+        export class Cmp {
+            constructor(param: string) {}
+        }
+        @Directive()
+        export abstract class ParentDir {
+            constructor(param: string) {}
+        }
+        @Directive()
+        export abstract class AbstractChildDir extends ParentDir {}
+        @Directive()
+        export class ChildDir extends AbstractChildDir {}
+    "#;
+    type Found = (u32, String, String, Vec<String>, Vec<(String, String)>);
+    let diagnostics_for = |strict: bool| -> Vec<Found> {
+        let mut virtual_files = HashMap::new();
+        virtual_files.insert("/project/app.ts".to_string(), source.to_string());
+        virtual_files.insert("/project/types.ts".to_string(), types.to_string());
+        virtual_files.insert(
+            "/project/tsconfig.json".to_string(),
+            format!(
+                r#"{{"files": ["app.ts"], "angularCompilerOptions": {{"strictInjectionParameters": {strict}}}}}"#
+            ),
+        );
+        let analyzer = Analyzer::new(AnalyzerOptions {
+            tsconfig_path: "/project/tsconfig.json".to_string(),
+            optimize: Some(true),
+            virtual_files: Some(virtual_files),
+            ..Default::default()
+        })
+        .unwrap();
+        let meta = analyzer
+            .get_metadata_for_file("/project/app.ts".to_string())
+            .expect("app.ts metadata");
+        let text = |span: &crate::SpanMetadata| {
+            source[span.start as usize..span.end as usize].to_string()
+        };
+        meta.diagnostics
+            .iter()
+            .map(|diag| {
+                (
+                    diag.code,
+                    diag.message_text.clone(),
+                    text(diag.span.as_ref().expect("span")),
+                    diag.next.clone(),
+                    diag.related_information
+                        .iter()
+                        .map(|info| (info.message_text.clone(), text(&info.span)))
+                        .collect(),
+                )
+            })
+            .collect()
+    };
+    let missing = |class: &str, param: &str| {
+        format!("No suitable injection token for parameter '{param}' of class '{class}'.")
+    };
+    let use_inject =
+        vec!["Consider using the @Inject decorator to specify an injection token.".to_string()];
+    let unsupported = |ty: &str| {
+        vec![(
+            "This type is not supported as injection token.".to_string(),
+            ty.to_string(),
+        )]
+    };
+    let no_value = "This type does not have a value, so it cannot be used as injection token.";
+
+    let cmp = (
+        2003,
+        missing("Cmp", "param"),
+        "param".to_string(),
+        use_inject.clone(),
+        unsupported("string"),
+    );
+    assert_eq!(diagnostics_for(false), vec![cmp.clone()]);
+
+    assert_eq!(
+        diagnostics_for(true),
+        vec![
+            (
+                2003,
+                missing("Primitive", "notInjectable"),
+                "notInjectable".to_string(),
+                use_inject.clone(),
+                unsupported("string"),
+            ),
+            (
+                2003,
+                missing("Interface", "param"),
+                "param".to_string(),
+                use_inject.clone(),
+                vec![
+                    (no_value.to_string(), "Iface".to_string()),
+                    (
+                        "The type is declared here.".to_string(),
+                        "interface Iface {}".to_string()
+                    ),
+                ],
+            ),
+            (
+                2003,
+                missing("TypeOnlyImport", "param"),
+                "param".to_string(),
+                vec![
+                    "Consider changing the type-only import to a regular import, or use the \
+                     @Inject decorator to specify an injection token."
+                        .to_string()
+                ],
+                vec![
+                    (
+                        "This type is imported using a type-only import, which prevents it from \
+                         being usable as an injection token."
+                            .to_string(),
+                        "TypeOnly".to_string()
+                    ),
+                    (
+                        "The type-only import occurs here.".to_string(),
+                        "import type { TypeOnly } from './types';".to_string()
+                    ),
+                ],
+            ),
+            (
+                2003,
+                missing("Namespace", "param"),
+                "param".to_string(),
+                use_inject.clone(),
+                vec![
+                    (
+                        "This type corresponds with a namespace, which cannot be used as \
+                         injection token."
+                            .to_string(),
+                        "Ns".to_string()
+                    ),
+                    (
+                        "The namespace import occurs here.".to_string(),
+                        "* as Ns".to_string()
+                    ),
+                ],
+            ),
+            (
+                2003,
+                missing("Untyped", "param"),
+                "param".to_string(),
+                vec![
+                    "Consider adding a type to the parameter or use the @Inject decorator to \
+                     specify an injection token."
+                        .to_string()
+                ],
+                vec![],
+            ),
+            (
+                2003,
+                missing("ImportedInterface", "param"),
+                "param".to_string(),
+                use_inject.clone(),
+                vec![(no_value.to_string(), "Shape".to_string())],
+            ),
+            cmp,
+            (
+                2016,
+                "The directive ChildDir inherits its constructor from ParentDir, but the latter \
+                 has a constructor parameter that is not compatible with dependency injection. \
+                 Either add an explicit constructor to ChildDir or change ParentDir's constructor \
+                 to use parameters that are valid for DI."
+                    .to_string(),
+                "ChildDir".to_string(),
+                vec![],
+                vec![],
+            ),
+        ]
+    );
+}
+
+#[test]
+fn test_input_transform_diagnostics() {
+    let util = r#"
+        interface InternalType { foo: boolean; }
+        export interface PublicType { foo: boolean; }
+        export const CompanionUtilType = { A: 'a' } as const;
+        export type CompanionUtilType = (typeof CompanionUtilType)[keyof typeof CompanionUtilType];
+        export function internalParam(val: InternalType) { return 1; }
+        export function nestedInternalParam(val: {value: InternalType}) { return 1; }
+        export function publicParam(val: PublicType) { return 1; }
+        export function companionUtilParam(val: CompanionUtilType) { return 1; }
+        export const constArrow = (val: string) => 1;
+    "#;
+    let source = r#"
+        import { Directive, Input } from '@angular/core';
+        import { internalParam, nestedInternalParam, publicParam, companionUtilParam, constArrow } from './util';
+        import { publicParam as aliasedPublicParam, internalParam as aliasedInternalParam } from './util';
+
+        const NOT_A_FUNCTION: any = null!;
+        interface Hidden { foo: boolean; }
+        export interface Shown { foo: boolean; }
+        interface Aliased { foo: boolean; }
+        export { Aliased as PublicAlias };
+        export const CompanionType = { A: 'a' } as const;
+        export type CompanionType = (typeof CompanionType)[keyof typeof CompanionType];
+        const UnexportedConst = { A: 'a' } as const;
+        export type UnexportedConst = (typeof UnexportedConst)[keyof typeof UnexportedConst];
+        function overloaded(value: boolean): number;
+        function overloaded(value: string): number;
+        function overloaded(value: boolean | string) { return 1; }
+        function spread(...value: string[]) { return 1; }
+        function noParams() { return 1; }
+        function createTransform(outer: number) { return (inner: string) => outer; }
+
+        @Directive({
+            selector: '[dir]',
+            inputs: [{ name: 'fromArray', transform: NOT_A_FUNCTION }],
+        })
+        export class Dir {
+            fromArray!: number;
+            @Input({transform: NOT_A_FUNCTION}) literal!: number;
+            @Input({transform: (val) => 1}) untyped!: number;
+            @Input({transform: <T>(val: T) => 1}) generic!: number;
+            @Input({transform: (val: Hidden) => 1}) hidden!: number;
+            @Input({transform: (val: Shown) => 1}) shown!: number;
+            @Input({transform: (val: Aliased) => 1}) aliased!: number;
+            @Input({transform: (val: CompanionType) => 1}) companion!: number;
+            @Input({transform: (val: UnexportedConst) => 1}) companionRedecl!: number;
+            @Input({transform: overloaded}) overloads!: number;
+            @Input({transform: spread}) rest!: number;
+            @Input({transform: noParams}) none!: number;
+            @Input({transform: parseInt}) global!: number;
+            @Input({transform: createTransform(1)}) call!: number;
+            @Input({transform: internalParam}) imported!: number;
+            @Input({transform: nestedInternalParam}) nested!: number;
+            @Input({transform: publicParam}) importedPublic!: number;
+            @Input({transform: companionUtilParam}) importedCompanion!: number;
+            @Input({transform: aliasedPublicParam}) aliasedPublic!: number;
+            @Input({transform: aliasedInternalParam}) aliasedInternal!: number;
+            @Input({transform: constArrow}) arrowConst!: number;
+            @Input({transform: (val: string) => 1}) conflicting!: number;
+            static ngAcceptInputType_conflicting: boolean;
+        }
+    "#;
+    type Found = (u32, String, String);
+    let diagnostics_for = |optimize: bool| -> Vec<Found> {
+        let mut virtual_files = HashMap::new();
+        virtual_files.insert("/project/app.ts".to_string(), source.to_string());
+        virtual_files.insert("/project/util.ts".to_string(), util.to_string());
+        virtual_files.insert(
+            "/project/tsconfig.json".to_string(),
+            r#"{"files": ["app.ts"]}"#.to_string(),
+        );
+        let analyzer = Analyzer::new(AnalyzerOptions {
+            tsconfig_path: "/project/tsconfig.json".to_string(),
+            optimize: Some(optimize),
+            virtual_files: Some(virtual_files),
+            ..Default::default()
+        })
+        .unwrap();
+        let meta = if optimize {
+            analyzer
+                .get_metadata_for_file("/project/app.ts".to_string())
+                .expect("app.ts metadata")
+        } else {
+            let iterator = analyzer.analyze().unwrap();
+            let chunk = futures::executor::block_on(iterator.next())
+                .unwrap()
+                .expect("one chunk");
+            chunk
+                .files
+                .into_iter()
+                .find(|file| file.file_path.ends_with("app.ts"))
+                .expect("app.ts result")
+        };
+        meta.diagnostics
+            .iter()
+            .map(|diag| {
+                let span = diag.span.as_ref().expect("span");
+                let text = [diag.message_text.clone()]
+                    .into_iter()
+                    .chain(diag.next.iter().cloned())
+                    .collect::<Vec<_>>()
+                    .join("\n  ");
+                (
+                    diag.code,
+                    text,
+                    source[span.start as usize..span.end as usize].to_string(),
+                )
+            })
+            .collect()
+    };
+    let not_literal = |message: &str, span: &str| {
+        (
+            1010,
+            format!("{message}\n  Value is of type 'null'."),
+            span.to_string(),
+        )
+    };
+    let array = not_literal(
+        "Transform of value at position 0 of @Directive.inputs array must be a function",
+        "[{ name: 'fromArray', transform: NOT_A_FUNCTION }]",
+    );
+    let decorator = not_literal(
+        "Input transform must be a function",
+        "{transform: NOT_A_FUNCTION}",
+    );
+
+    // Local compilation only rejects transforms that are not even references.
+    assert_eq!(
+        diagnostics_for(false),
+        vec![array.clone(), decorator.clone()]
+    );
+
+    let wrong_type = |message: &str, detail: &str, span: &str| {
+        (1010, format!("{message}\n  {detail}"), span.to_string())
+    };
+    let dynamic = "Value could not be determined statically.";
+    assert_eq!(
+        diagnostics_for(true),
+        vec![
+            array,
+            decorator,
+            wrong_type(
+                "Input transform function first parameter must have a type",
+                dynamic,
+                "(val) => 1"
+            ),
+            wrong_type(
+                "Input transform function cannot be generic",
+                dynamic,
+                "<T>(val: T) => 1"
+            ),
+            (
+                3001,
+                "Symbol must be exported in order to be used as the type of an Input transform \
+                 function"
+                    .to_string(),
+                "Hidden".to_string()
+            ),
+            wrong_type(
+                "Input transform function cannot have multiple signatures",
+                "Value is a reference to 'overloaded'.",
+                "overloaded"
+            ),
+            wrong_type(
+                "Input transform function first parameter cannot be a spread parameter",
+                "Value is a reference to 'spread'.",
+                "spread"
+            ),
+            wrong_type(
+                "Input transform must be a function",
+                dynamic,
+                "createTransform(1)"
+            ),
+            (
+                3004,
+                "Unable to import type InternalType.".to_string(),
+                "internalParam".to_string()
+            ),
+            (
+                3004,
+                "Unable to import type InternalType.".to_string(),
+                "nestedInternalParam".to_string()
+            ),
+            (
+                3004,
+                "Unable to import type InternalType.".to_string(),
+                "aliasedInternalParam".to_string()
+            ),
+            wrong_type("Input transform must be a function", dynamic, "constArrow"),
+            (
+                2020,
+                "Class cannot have both a transform function on Input conflicting and a static \
+                 member called ngAcceptInputType_conflicting"
+                    .to_string(),
+                "(val: string) => 1".to_string()
+            ),
+        ]
+    );
+}
+
+#[test]
+fn test_ambient_constructors_and_injectable_options() {
+    let source = r#"
+        import { Directive, ElementRef, Injectable } from '@angular/core';
+
+        declare class AmbientBase {
+            constructor(dep: string);
+        }
+        export class WithParams {
+            constructor(elementRef: ElementRef) {}
+        }
+        declare class AmbientMiddle extends WithParams {
+            constructor(dep: string);
+        }
+
+        @Directive({ selector: '[a]' })
+        export class FromAmbient extends AmbientBase {}
+        @Directive({ selector: '[b]' })
+        export class ThroughAmbient extends AmbientMiddle {}
+
+        const useValue = 1;
+        @Injectable({ providedIn: 'root', useFactory() { return 1; } })
+        export class MethodFactory {
+            constructor(dep: string) {}
+        }
+        @Injectable({ providedIn: 'root', get useValue() { return 1; } })
+        export class GetterValue {
+            constructor(dep: string) {}
+        }
+        @Injectable({ providedIn: 'root', ['useValue']: 1 })
+        export class ComputedValue {
+            constructor(dep: string) {}
+        }
+        @Injectable({ providedIn: 'root', useValue })
+        export class ShorthandValue {
+            constructor(dep: string) {}
+        }
+    "#;
+    let mut virtual_files = HashMap::new();
+    virtual_files.insert("/project/app.ts".to_string(), source.to_string());
+    virtual_files.insert(
+        "/project/tsconfig.json".to_string(),
+        r#"{"files": ["app.ts"], "angularCompilerOptions": {"strictInjectionParameters": true}}"#
+            .to_string(),
+    );
+    let analyzer = Analyzer::new(AnalyzerOptions {
+        tsconfig_path: "/project/tsconfig.json".to_string(),
+        optimize: Some(true),
+        virtual_files: Some(virtual_files),
+        ..Default::default()
+    })
+    .unwrap();
+    let meta = analyzer
+        .get_metadata_for_file("/project/app.ts".to_string())
+        .expect("app.ts metadata");
+    let found: Vec<(u32, String, &str)> = meta
+        .diagnostics
+        .iter()
+        .map(|diag| {
+            let span = diag.span.as_ref().expect("span");
+            (
+                diag.code,
+                diag.message_text.clone(),
+                &source[span.start as usize..span.end as usize],
+            )
+        })
+        .collect();
+    let missing = |class: &str| {
+        (
+            2003,
+            format!("No suitable injection token for parameter 'dep' of class '{class}'."),
+            "dep",
+        )
+    };
+    // A body-less constructor outside a declaration file is not a constructor for ngtsc, so the
+    // walk skips ambient classes; and only `key: value`/shorthand options are read.
+    assert_eq!(
+        found,
+        vec![
+            (
+                2006,
+                "The directive ThroughAmbient inherits its constructor from WithParams, but the \
+                 latter does not have an Angular decorator of its own. Dependency injection will \
+                 not be able to resolve the parameters of WithParams's constructor. Either add a \
+                 @Directive decorator to WithParams, or add an explicit constructor to \
+                 ThroughAmbient."
+                    .to_string(),
+                "ThroughAmbient"
+            ),
+            missing("MethodFactory"),
+            missing("GetterValue"),
+            missing("ComputedValue"),
+        ]
+    );
 }

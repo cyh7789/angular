@@ -55,6 +55,7 @@ pub struct HostDirectiveEntry {
     pub is_forward_ref: bool,
     pub inputs: Option<Vec<crate::types::metadata::HostDirectiveBinding>>,
     pub outputs: Option<Vec<crate::types::metadata::HostDirectiveBinding>>,
+    pub origin_identifiers: Vec<oxc_span::Span>,
 }
 
 impl HostDirectiveEntry {
@@ -550,6 +551,8 @@ pub struct FileData {
     pub(crate) symbol_index: Arc<HashMap<ReferenceId, ClassInfo>>,
     /// Constructor facts for every class in the file, decorated or not, keyed by name.
     pub(crate) di_facts: Arc<HashMap<String, crate::analyzer::di_facts::ClassDiFacts>>,
+    /// Facts for the top-level function declarations, keyed by name.
+    pub(crate) function_facts: Arc<HashMap<String, crate::analyzer::transforms::FunctionFacts>>,
     /// Re-export table (`export … from …`).
     pub(crate) file_exports: Arc<crate::analyzer::FileExportInfo>,
     pub(crate) errors: Vec<String>,

@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone)]
 pub struct ResolvedTsConfig {
-    pub files: HashSet<PathBuf>,
+    pub files: Vec<PathBuf>,
     pub compiler_options: CompilerOptions,
     pub preserve_symlinks: bool,
     pub workspace_name: Option<String>,
@@ -14,6 +14,9 @@ pub struct ResolvedTsConfig {
     pub compile_non_exported_classes: bool,
     pub enable_hmr: bool,
     pub strict_standalone: bool,
+    pub compile_poisoned_components: bool,
+    pub strict_injection_parameters: bool,
+    pub use_host_for_import_generation: bool,
 }
 
 pub fn load_and_resolve_tsconfig(
@@ -52,14 +55,15 @@ pub fn load_and_resolve_tsconfig(
     let extended_options = resolve_extended_options_recursive(path, fs, &resolver, &mut visited)?;
     resolved_compiler_options.root_dirs = extended_options.root_dirs;
 
-    // Resolve files
-    let mut files = HashSet::new();
+    // Resolve files (preserving tsconfig `files` order, then sorted `include` expansion)
+    let mut files = Vec::new();
+    let mut seen_files = HashSet::new();
     let base_dir = path.parent().unwrap_or(Path::new("."));
 
     // 1. files
     for f in resolved_files {
-        if fs.metadata(&f).is_ok() {
-            files.insert(f);
+        if fs.metadata(&f).is_ok() && seen_files.insert(f.clone()) {
+            files.push(f);
         }
     }
 
@@ -67,8 +71,16 @@ pub fn load_and_resolve_tsconfig(
     let allow_js = resolved_compiler_options.allow_js.unwrap_or(false);
 
     if !resolved_include.is_empty() {
-        let expanded = expand_globs(base_dir, &resolved_include, &resolved_exclude, allow_js, fs);
-        files.extend(expanded);
+        let mut expanded: Vec<PathBuf> =
+            expand_globs(base_dir, &resolved_include, &resolved_exclude, allow_js, fs)
+                .into_iter()
+                .collect();
+        expanded.sort();
+        for f in expanded {
+            if seen_files.insert(f.clone()) {
+                files.push(f);
+            }
+        }
     }
 
     Ok(ResolvedTsConfig {
@@ -84,6 +96,15 @@ pub fn load_and_resolve_tsconfig(
             .unwrap_or(true),
         enable_hmr: extended_options.enable_hmr.unwrap_or(false),
         strict_standalone: extended_options.strict_standalone.unwrap_or(false),
+        compile_poisoned_components: extended_options
+            .compile_poisoned_components
+            .unwrap_or(false),
+        strict_injection_parameters: extended_options
+            .strict_injection_parameters
+            .unwrap_or(false),
+        use_host_for_import_generation: extended_options
+            .use_host_for_import_generation
+            .unwrap_or(false),
     })
 }
 
@@ -256,6 +277,9 @@ struct ExtendedOptions {
     compile_non_exported_classes: Option<bool>,
     enable_hmr: Option<bool>,
     strict_standalone: Option<bool>,
+    compile_poisoned_components: Option<bool>,
+    strict_injection_parameters: Option<bool>,
+    use_host_for_import_generation: Option<bool>,
 }
 
 fn resolve_extended_options_recursive(
@@ -326,6 +350,33 @@ fn resolve_extended_options_recursive(
             .and_then(|v| v.as_bool())
     });
 
+    let mut current_compile_poisoned_components = parsed_json.as_ref().ok().and_then(|json| {
+        json.pointer("/angularCompilerOptions/_compilePoisonedComponents")
+            .and_then(|v| v.as_bool())
+    });
+
+    let mut current_strict_injection_parameters = parsed_json.as_ref().ok().and_then(|json| {
+        json.pointer("/angularCompilerOptions/strictInjectionParameters")
+            .and_then(|v| v.as_bool())
+    });
+
+    // Either flag selects host-driven module naming in ngtsc (`makeCompilation`); the alias
+    // variant additionally enables aliasing, which the analyzer does not implement.
+    let mut current_use_host_for_import_generation = parsed_json.as_ref().ok().and_then(|json| {
+        let read = |key: &str| {
+            json.pointer(&format!("/angularCompilerOptions/{key}"))
+                .or_else(|| json.pointer(&format!("/bazelOptions/angularCompilerOptions/{key}")))
+                .and_then(|v| v.as_bool())
+        };
+        match (
+            read("_useHostForImportGeneration"),
+            read("_useHostForImportAndAliasGeneration"),
+        ) {
+            (None, None) => None,
+            (a, b) => Some(a.unwrap_or(false) || b.unwrap_or(false)),
+        }
+    });
+
     let base_dir = abs_path.parent().unwrap_or(Path::new("."));
 
     let mut current_root_dirs = tsconfig.compiler_options.root_dirs.clone().map(|dirs| {
@@ -344,6 +395,9 @@ fn resolve_extended_options_recursive(
         && current_compile_non_exported.is_some()
         && current_enable_hmr.is_some()
         && current_strict_standalone.is_some()
+        && current_compile_poisoned_components.is_some()
+        && current_strict_injection_parameters.is_some()
+        && current_use_host_for_import_generation.is_some()
     {
         visited.remove(&canonical);
         return Ok(ExtendedOptions {
@@ -354,6 +408,9 @@ fn resolve_extended_options_recursive(
             compile_non_exported_classes: current_compile_non_exported,
             enable_hmr: current_enable_hmr,
             strict_standalone: current_strict_standalone,
+            compile_poisoned_components: current_compile_poisoned_components,
+            strict_injection_parameters: current_strict_injection_parameters,
+            use_host_for_import_generation: current_use_host_for_import_generation,
         });
     }
 
@@ -367,6 +424,9 @@ fn resolve_extended_options_recursive(
             compile_non_exported_classes: current_compile_non_exported,
             enable_hmr: current_enable_hmr,
             strict_standalone: current_strict_standalone,
+            compile_poisoned_components: current_compile_poisoned_components,
+            strict_injection_parameters: current_strict_injection_parameters,
+            use_host_for_import_generation: current_use_host_for_import_generation,
         });
     };
 
@@ -416,6 +476,15 @@ fn resolve_extended_options_recursive(
         if let Some(strict_standalone) = res.strict_standalone {
             inherited.strict_standalone = Some(strict_standalone);
         }
+        if let Some(compile_poisoned_components) = res.compile_poisoned_components {
+            inherited.compile_poisoned_components = Some(compile_poisoned_components);
+        }
+        if let Some(strict_injection_parameters) = res.strict_injection_parameters {
+            inherited.strict_injection_parameters = Some(strict_injection_parameters);
+        }
+        if let Some(use_host) = res.use_host_for_import_generation {
+            inherited.use_host_for_import_generation = Some(use_host);
+        }
     }
     if current_root_dirs.is_none() {
         current_root_dirs = inherited.root_dirs;
@@ -438,6 +507,15 @@ fn resolve_extended_options_recursive(
     if current_strict_standalone.is_none() {
         current_strict_standalone = inherited.strict_standalone;
     }
+    if current_compile_poisoned_components.is_none() {
+        current_compile_poisoned_components = inherited.compile_poisoned_components;
+    }
+    if current_strict_injection_parameters.is_none() {
+        current_strict_injection_parameters = inherited.strict_injection_parameters;
+    }
+    if current_use_host_for_import_generation.is_none() {
+        current_use_host_for_import_generation = inherited.use_host_for_import_generation;
+    }
 
     visited.remove(&canonical);
     Ok(ExtendedOptions {
@@ -448,6 +526,9 @@ fn resolve_extended_options_recursive(
         compile_non_exported_classes: current_compile_non_exported,
         enable_hmr: current_enable_hmr,
         strict_standalone: current_strict_standalone,
+        compile_poisoned_components: current_compile_poisoned_components,
+        strict_injection_parameters: current_strict_injection_parameters,
+        use_host_for_import_generation: current_use_host_for_import_generation,
     })
 }
 

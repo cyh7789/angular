@@ -79,6 +79,8 @@ export interface AnalyzerOptions {
   /** Root directories used by `PrefixImportStrategy` to strip prefixes. */
   rootDirs?: Array<string>;
   enableHmr?: boolean;
+  usePoisonedData?: boolean;
+  useHostForImportGeneration?: boolean;
 }
 
 export interface AngularFieldMetadata {
@@ -228,6 +230,7 @@ export interface ComponentMetadata {
   declaringNgModule?: DeclaringNgModule;
   foreignImports?: Array<ForeignImportMetadata>;
   isJit: boolean;
+  isPoisoned: boolean;
   deferredImports?: Array<ReferenceMetadata>;
   deferredImportsByBlock?: Record<string, Array<ReferenceMetadata>>;
   deferredImportsSpan?: SpanMetadata;
@@ -625,12 +628,22 @@ export interface LegacyAnimationTriggerNames {
   includesDynamicAnimations: boolean;
 }
 
+export interface NgRelatedInformation {
+  filePath: string;
+  span: SpanMetadata;
+  messageText: string;
+}
+
 export interface NgDiagnostic {
   category: number;
   code: number;
+  /** The head of the message; the details of a message chain are in `next`. */
   messageText: string;
   filePath?: string;
   span?: SpanMetadata;
+  /** The messages chained under `messageText` (`ts.DiagnosticMessageChain.next`). */
+  next?: string[];
+  relatedInformation?: NgRelatedInformation[];
 }
 
 export interface NgModuleMetadata {
@@ -824,6 +837,10 @@ export interface TestAnalyzerOptions {
   workspaceName?: string;
   /** Root directories for `PrefixImportStrategy` */
   rootDirs?: Array<string>;
+  enableHmr?: boolean;
+  usePoisonedData?: boolean;
+  /** See `AnalyzerOptions.useHostForImportGeneration`. */
+  useHostForImportGeneration?: boolean;
 }
 
 /** Text to splice into the source at `position`, a UTF-16 offset. */

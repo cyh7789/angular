@@ -54,6 +54,8 @@ export interface NgpCompilerOptions {
   _experimentalAllowEmitDeclarationOnly?: boolean;
   onlyPublishPublicTypingsForNgModules?: boolean;
   workspaceName?: string;
+  _useHostForImportGeneration?: boolean;
+  _useHostForImportAndAliasGeneration?: boolean;
 
   // Compilation (`MiscOptions`, `TargetOptions`, `InternalOptions`).
   legacyOptionalChaining?: boolean;
@@ -64,11 +66,13 @@ export interface NgpCompilerOptions {
   supportTestBed?: boolean;
   preserveWhitespaces?: boolean;
   _enableHmr?: boolean;
+  _compilePoisonedComponents?: boolean;
 
   // i18n (`I18nOptions`).
   enableI18nLegacyMessageIdFormat?: boolean;
   i18nUseExternalIds?: boolean;
   i18nNormalizeLineEndingsInICUs?: boolean;
+  i18nPreserveWhitespaceForLegacyExtraction?: boolean;
 
   // TypeScript `compilerOptions` that ngtsc reads off the same merged options object.
   emitDeclarationOnly?: boolean;
