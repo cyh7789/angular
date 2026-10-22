@@ -31,6 +31,7 @@ import {
   compileClassDebugInfo,
   compileComponentClassMetadata,
   compileComponentFromMetadata,
+  compileCtorParameters,
   compileDeferResolverFunction,
   compileDirectiveFromMetadata,
   compileFactoryFunction,
@@ -42,7 +43,6 @@ import {
   compileService,
   makeBindingParser,
   outputAst as o,
-  parseTemplate,
   type BindingParser,
   type R3CompiledExpression,
   type R3ComponentDeferMetadata,
@@ -64,15 +64,16 @@ import {
   createDummySourceSpan,
   createEmptySourceSpan,
   createForeignComponentMatcher,
+  getOrParseComponentTemplate,
   makeClassKey,
   metadataToDeclaration,
-  parseDirectInlineTemplate,
   refName,
   refToExpression,
   refToTypeExpression,
   stripIife,
   type MinimalDirectiveMeta,
 } from './compiler-utils.js';
+import {DependencyTemplates} from './dependency_templates.js';
 import {
   ChunkContext,
   FileAnalysis,
@@ -185,8 +186,10 @@ export function buildTcbTargets(
   templatesByClass: Map<string, ParsedComponentTemplate>,
   options: Partial<ParseTemplateOptions> = {},
   tcbConfig: NgpTypeCheckingConfig,
+  dependencyTemplates: DependencyTemplates,
 ): TcbTargetInput[] {
   const tcbTargets: TcbTargetInput[] = [];
+  const consumer = {filePath, content, classes, templatesByClass};
 
   for (const cls of classes) {
     const {className, component, directive, hostBindings, hostListeners} = cls;
@@ -200,12 +203,14 @@ export function buildTcbTargets(
       }
 
       // 1. Parse template (or reuse if already parsed in processFile)
-      const classKey = makeClassKey(cls.className, cls.span.start);
-      let parsed = templatesByClass.get(classKey);
-      if (!parsed) {
-        parsed = parseComponentTemplate(component, filePath, content, options);
-        templatesByClass.set(classKey, parsed);
-      }
+      const parsed = getOrParseComponentTemplate(
+        templatesByClass,
+        cls,
+        component,
+        filePath,
+        content,
+        options,
+      );
 
       const parsedSchemas: SchemaMetadata[] = [];
       if (component.schemas) {
@@ -231,7 +236,10 @@ export function buildTcbTargets(
         className,
         template: component.template || '',
         templateNodes: parsed.diagNodes,
-        declarations: component.resolvedDeclarations ?? [],
+        declarations: dependencyTemplates.withNgContentSelectors(
+          component.resolvedDeclarations ?? [],
+          consumer,
+        ),
         enableSelectorless: options.enableSelectorless ?? false,
         selectorlessEnabled,
         ownDeclaration: metadataToDeclaration(
@@ -313,31 +321,35 @@ export async function processFile(
   if (!result) {
     return unprocessedFile(new MagicString(content));
   }
-  const fileAnalysis = getOrCreateFileAnalysis(rawCtx.fileCache, filePath);
-  if (!fileAnalysis.parsedTemplates) {
-    fileAnalysis.parsedTemplates = new Map<string, ParsedComponentTemplate>();
-  }
-  const templatesByClass = fileAnalysis.parsedTemplates;
+  const {parsedTemplates: templatesByClass} = getOrCreateFileAnalysis(rawCtx.fileCache, filePath);
   const resourceMap = new Map<string, nga.ResolvedResource | null>();
   for (const classMeta of result.classes) {
     if (!classMeta.component || !classMeta.className) continue;
-    const classKey = makeClassKey(classMeta.className, classMeta.span.start);
-    let parsed = templatesByClass.get(classKey);
-    if (!parsed) {
-      parsed = parseComponentTemplate(
-        classMeta.component,
-        filePath,
-        content,
-        rawCtx.templateParseOptions,
-      );
-      templatesByClass.set(classKey, parsed);
-    }
+    const parsed = getOrParseComponentTemplate(
+      templatesByClass,
+      classMeta,
+      classMeta.component,
+      filePath,
+      content,
+      rawCtx.templateParseOptions,
+    );
     for (const styleUrl of parsed.styleUrls) {
       if (!resourceMap.has(styleUrl)) {
         const resource = await rawCtx.analyzer.readResource(filePath, styleUrl);
         resourceMap.set(styleUrl, resource);
       }
     }
+  }
+  // Templates of dependencies declared in other files are needed to bind this file's
+  // templates for type-checking; read them here, where the analyzer can be awaited. The
+  // condition mirrors when `processFileSync` builds the TCB targets.
+  if (rawCtx.optimize && !rawCtx.emitDeclarationOnly) {
+    await new DependencyTemplates(
+      rawCtx.analyzer,
+      rawCtx.fileCache,
+      rawCtx.templateParseOptions,
+      chunkContext?.metadataMap || rawCtx.metadataMap,
+    ).prefetch(result);
   }
   return processFileSync(rawCtx, filePath, content, resourceMap, result, chunkContext);
 }
@@ -392,12 +404,7 @@ export function processFileSync(
     }
   }
 
-  let fileAnalysis = getOrCreateFileAnalysis(ctx.fileCache, filePath);
-  let templatesByClass = fileAnalysis.parsedTemplates;
-  if (!templatesByClass) {
-    templatesByClass = new Map<string, ParsedComponentTemplate>();
-    fileAnalysis.parsedTemplates = templatesByClass;
-  }
+  const {parsedTemplates: templatesByClass} = getOrCreateFileAnalysis(ctx.fileCache, filePath);
 
   // Shared pool for all components and directives in the file.
   // This mirrors Angular's behavior:
@@ -511,6 +518,24 @@ export function processFileSync(
           query.propertySpan!.start,
           `@${coreNamespace}.${decoratorName}(${predicateStr}, ${optionsStr}) `,
         );
+      }
+
+      if (!ctx.emitDeclarationOnly && constructorParams && constructorParams.length > 0) {
+        const ctorParams = buildCtorParametersExpr(
+          constructorParams,
+          s,
+          /* omitEmptyDecorators */ true,
+        );
+        if (ctorParams) {
+          const ctorExpr = compileCtorParameters(ctorParams, /* allowSuppressions */ true);
+          const jsdoc = ctx.isClosureCompilerEnabled
+            ? '/** @internal @nocollapse */'
+            : '/** @internal */';
+          s.appendLeft(
+            span.end - 1,
+            `\n  ${jsdoc}\n  static ctorParameters = ${printer.print(ctorExpr)};\n`,
+          );
+        }
       }
 
       continue;
@@ -643,12 +668,14 @@ export function processFileSync(
       }
 
       // 1. Parse template (or reuse if already parsed)
-      const classKey = makeClassKey(classMeta.className, classMeta.span.start);
-      let parsed = templatesByClass.get(classKey);
-      if (!parsed) {
-        parsed = parseComponentTemplate(component, filePath, content, ctx.templateParseOptions);
-        templatesByClass.set(classKey, parsed);
-      }
+      const parsed = getOrParseComponentTemplate(
+        templatesByClass,
+        classMeta,
+        component,
+        filePath,
+        content,
+        ctx.templateParseOptions,
+      );
 
       if (parsed.errors && parsed.errors.length > 0) {
         for (const error of parsed.errors) {
@@ -907,15 +934,18 @@ export function processFileSync(
         }
       }
 
-      const usedDeclarations = filteredDeclarations.filter((d) => {
-        if (d.declarationType === 'ngmodule') {
-          return true; // Eagerly preserve NgModules!
-        }
-        if (d.declarationType === 'pipe') {
-          return d.pipeName && usedPipes.has(d.pipeName) && pipeNameToDecl.get(d.pipeName) === d;
-        }
-        return usedDirectiveDecls.has(d);
-      });
+      // Match ngtsc's `componentDependenciesToDeclarations` ordering (directives & NgModules in
+      // scope order first, then pipes from the pipe map) before iterating for deferred symbol
+      // tracking and per-block `@defer` resolvers.
+      const usedDirectivesAndModules = filteredDeclarations.filter(
+        (d) =>
+          d.declarationType === 'ngmodule' ||
+          (d.declarationType !== 'pipe' && usedDirectiveDecls.has(d)),
+      );
+      const usedPipeDecls = Array.from(pipeNameToDecl.values()).filter(
+        (d) => d.pipeName != null && usedPipes.has(d.pipeName),
+      );
+      const usedDeclarations = [...usedDirectivesAndModules, ...usedPipeDecls];
 
       const hasBlockSpecificImports = component?.deferredImportsByBlock != null;
       const hasDeferredImportsField = hasBlockSpecificImports || component?.deferredImports != null;
@@ -1224,28 +1254,20 @@ export function processFileSync(
         }
 
         const blockBound = binder.bind({template: block.children});
+        const blockUsedDirectiveDecls = new Set(toDecls(blockBound.getEagerlyUsedDirectives()));
+        const blockUsedPipes = new Set(blockBound.getEagerlyUsedPipes());
         const dependencies: R3DeferPerBlockDependency[] = [];
 
-        for (const decl of toDecls(blockBound.getEagerlyUsedDirectives())) {
-          if (allowedNames !== null && !allowedNames.has(decl.name)) continue;
-
-          const imported = deferredImportIfDeferrable(decl.ref);
-          if (imported === null) {
-            markNotDeferrable(decl.ref.localAlias);
-          }
-          dependencies.push({
-            typeReference: refToExpression(decl.ref),
-            symbolName: imported?.symbolName ?? decl.name,
-            isDeferrable: imported !== null,
-            importPath: imported?.importPath ?? null,
-            isDefaultImport: imported?.isDefaultImport ?? false,
-          });
-        }
-
-        // Add deferred pipes
-        for (const pipeName of blockBound.getEagerlyUsedPipes()) {
-          const decl = pipeNameToDecl.get(pipeName);
-          if (!decl) continue;
+        // Iterate `usedDeclarations` (scope-ordered directives/NgModules followed by pipes) rather
+        // than `blockBound.getEagerlyUsedDirectives()` (template encounter order) so the per-block
+        // resolver function matches ngtsc's `componentDependenciesToDeclarations` order.
+        for (const decl of usedDeclarations) {
+          if (decl.declarationType === 'ngmodule') continue;
+          const isUsedInBlock =
+            decl.declarationType === 'pipe'
+              ? decl.pipeName != null && blockUsedPipes.has(decl.pipeName)
+              : blockUsedDirectiveDecls.has(decl);
+          if (!isUsedInBlock) continue;
           if (allowedNames !== null && !allowedNames.has(decl.name)) continue;
 
           const imported = deferredImportIfDeferrable(decl.ref);
@@ -1568,34 +1590,45 @@ export function processFileSync(
         out.appendLeft(span.end - 1, compiledFac + compiledDir + classMeta.coercionMembers);
       });
     }
-    if (ngModule) {
-      if (!ctx.emitDeclarationOnly) {
-        decoratorsToEmit.push({
-          decoratorName: ngModule.decoratorName ?? 'NgModule',
-          argsSpan: ngModule.argsSpan ?? undefined,
-        });
-      }
-      factoryGenerated = true;
-      deferredClassAppends.push(() => {
-        const {compiledFac, compiledMod, compiledInj, statements} = compileNgModuleDef(
-          className,
-          ngModule,
-          deps,
-          printer,
-          ctx,
-          classes,
-          classMeta,
-          s,
-          filePath,
-          fileDiagnostics,
-        );
+    if (service) {
+      decoratorsToEmit.push({
+        decoratorName: service.decoratorName ?? 'Service',
+        argsSpan: service.argsSpan ?? undefined,
+      });
 
-        out.appendLeft(span.end - 1, compiledFac + compiledMod + compiledInj);
-        // The NgModule side-effect statements (`ɵɵsetNgModuleScope`, `ɵɵregisterNgModuleType`)
-        // must be emitted AFTER `ɵsetClassMetadata`. The reference compiler unshifts the class
-        // metadata statement to the front of these statements before emission.
-        // https://github.com/angular/angular/blob/83622ee/packages/compiler-cli/src/ngtsc/annotations/ng_module/src/handler.ts#L1007-L1014
-        ngModuleStatements = statements;
+      const factoryRes = compileFactoryFunction({
+        name: className,
+        type: {
+          value: o.variable(className),
+          type: o.variable(className),
+        },
+        typeArgumentCount: classMeta?.typeParameters?.length ?? 0,
+        deps: [], // Intentional since services don't allow constructor DI.
+        target: FactoryTarget.Service,
+      });
+
+      const serviceMeta: R3ServiceMetadata = {
+        name: className,
+        type: {
+          value: o.variable(className),
+          type: o.variable(className),
+        },
+        typeArgumentCount: classMeta?.typeParameters?.length ?? 0,
+        autoProvided: service.autoProvided,
+        factory: service.factory ? rawSlice(s, service.factory.span, guards) : undefined,
+      };
+
+      const def = compileService(serviceMeta, false);
+      deferredClassAppends.push(() => {
+        const compiledFactory = compileFactoryField(factoryRes, printer, ctx);
+        const compiledProv = createStaticField(
+          'ɵprov',
+          printer.print(def.expression),
+          printer.emitTypes ? printer.printType(def.type) : null,
+          true,
+          ctx.isClosureCompilerEnabled,
+        );
+        out.appendLeft(span.end - 1, compiledFactory + compiledProv);
       });
     }
 
@@ -1604,19 +1637,25 @@ export function processFileSync(
         decoratorName: injectable.decoratorName ?? 'Injectable',
         argsSpan: injectable.argsSpan ?? undefined,
       });
-      // 1. Generate ɵfac (Factory) if not already generated by another decorator
-      const factoryRes = !factoryGenerated
-        ? compileFactoryFunction({
-            name: className,
-            type: {
-              value: o.variable(className),
-              type: o.variable(className),
-            },
-            typeArgumentCount: classMeta?.typeParameters?.length ?? 0,
-            deps: deps,
-            target: FactoryTarget.Injectable,
-          })
-        : null;
+      // 1. Generate ɵfac (Factory) if no other Angular class decorator is present.
+      // Mirrors ngtsc's `InjectableDecoratorHandler`, which sets `needsFactory: !hasOtherAngularDecorator`
+      // and runs before `NgModuleDecoratorHandler` so `@NgModule` + `@Injectable` emits `ɵprov`
+      // followed by `ɵfac`, `ɵmod`, `ɵinj`.
+      // https://github.com/angular/angular/blob/dea3241/packages/compiler-cli/src/ngtsc/annotations/src/injectable.ts#L140-L143
+      const hasOtherAngularDecorator = !!(pipe || component || directive || ngModule || service);
+      const factoryRes =
+        !factoryGenerated && !hasOtherAngularDecorator
+          ? compileFactoryFunction({
+              name: className,
+              type: {
+                value: o.variable(className),
+                type: o.variable(className),
+              },
+              typeArgumentCount: classMeta?.typeParameters?.length ?? 0,
+              deps: deps,
+              target: FactoryTarget.Injectable,
+            })
+          : null;
 
       const wrapProviderField = (field: nga.ProviderField) => ({
         expression: rawSlice(s, field.span, guards),
@@ -1674,45 +1713,34 @@ export function processFileSync(
       });
     }
 
-    if (service) {
-      decoratorsToEmit.push({
-        decoratorName: service.decoratorName ?? 'Service',
-        argsSpan: service.argsSpan ?? undefined,
-      });
-
-      const factoryRes = compileFactoryFunction({
-        name: className,
-        type: {
-          value: o.variable(className),
-          type: o.variable(className),
-        },
-        typeArgumentCount: classMeta?.typeParameters?.length ?? 0,
-        deps: [], // Intentional since services don't allow constructor DI.
-        target: FactoryTarget.Service,
-      });
-
-      const serviceMeta: R3ServiceMetadata = {
-        name: className,
-        type: {
-          value: o.variable(className),
-          type: o.variable(className),
-        },
-        typeArgumentCount: classMeta?.typeParameters?.length ?? 0,
-        autoProvided: service.autoProvided,
-        factory: service.factory ? rawSlice(s, service.factory.span, guards) : undefined,
-      };
-
-      const def = compileService(serviceMeta, false);
+    if (ngModule) {
+      if (!ctx.emitDeclarationOnly) {
+        decoratorsToEmit.push({
+          decoratorName: ngModule.decoratorName ?? 'NgModule',
+          argsSpan: ngModule.argsSpan ?? undefined,
+        });
+      }
+      factoryGenerated = true;
       deferredClassAppends.push(() => {
-        const compiledFactory = compileFactoryField(factoryRes, printer, ctx);
-        const compiledProv = createStaticField(
-          'ɵprov',
-          printer.print(def.expression),
-          printer.emitTypes ? printer.printType(def.type) : null,
-          true,
-          ctx.isClosureCompilerEnabled,
+        const {compiledFac, compiledMod, compiledInj, statements} = compileNgModuleDef(
+          className,
+          ngModule,
+          deps,
+          printer,
+          ctx,
+          classes,
+          classMeta,
+          s,
+          filePath,
+          fileDiagnostics,
         );
-        out.appendLeft(span.end - 1, compiledFactory + compiledProv);
+
+        out.appendLeft(span.end - 1, compiledFac + compiledMod + compiledInj);
+        // The NgModule side-effect statements (`ɵɵsetNgModuleScope`, `ɵɵregisterNgModuleType`)
+        // must be emitted AFTER `ɵsetClassMetadata`. The reference compiler unshifts the class
+        // metadata statement to the front of these statements before emission.
+        // https://github.com/angular/angular/blob/83622ee/packages/compiler-cli/src/ngtsc/annotations/ng_module/src/handler.ts#L1007-L1014
+        ngModuleStatements = statements;
       });
     }
 
@@ -1871,6 +1899,12 @@ export function processFileSync(
           templatesByClass,
           ctx.templateParseOptions,
           ctx.tcbConfig,
+          new DependencyTemplates(
+            ctx.analyzer,
+            ctx.fileCache,
+            ctx.templateParseOptions,
+            ctx.metadataMap,
+          ),
         )
       : [];
   const prepared =
@@ -2104,6 +2138,7 @@ function buildDecoratorMetadataExpr(
 function buildCtorParametersExpr(
   constructorParams: nga.ConstructorParamMetadata[] | undefined,
   s: MagicString,
+  omitEmptyDecorators = false,
 ): R3ClassMetadataCtorParameter[] | null {
   if (constructorParams == null) {
     return null;
@@ -2115,7 +2150,9 @@ function buildCtorParametersExpr(
       const ngDecorators = param.decorators
         .filter((d) => d.isAngular)
         .map((d) => buildDecoratorMetadataExpr(d.name, d.argsSpan, d.argsString, s, []));
-      decorators = o.literalArr(ngDecorators);
+      if (!omitEmptyDecorators || ngDecorators.length > 0) {
+        decorators = o.literalArr(ngDecorators);
+      }
     }
     return {
       type: typeName == null ? null : o.variable(typeName),
@@ -2279,6 +2316,34 @@ function buildPropDecoratorsExpr(
   return o.literalMap(entries);
 }
 
+// TODO: Remove once ngp is the default compiler (sorting class decorators in source order for
+// `ɵsetClassMetadata` is only needed for syntactic parity with ngtsc).
+function getDecoratorSourceOffset(
+  dec: DecoratorMetadata,
+  classMeta: nga.ClassMetadata,
+  source: string,
+): number {
+  if (dec.argsSpan != null) {
+    return dec.argsSpan.start;
+  }
+  const classHeaderEnd = classMeta.nameSpan?.start ?? classMeta.span.end;
+  const prefix = `@${dec.decoratorName}`;
+  for (const r of classMeta.removalSpans) {
+    if (r.start >= classHeaderEnd) {
+      continue;
+    }
+    const trimmed = source.slice(r.start, r.end).trimStart();
+    if (!trimmed.startsWith(prefix)) {
+      continue;
+    }
+    const after = trimmed.slice(prefix.length);
+    if (after.length === 0 || /^[\s(<]/.test(after)) {
+      return r.start;
+    }
+  }
+  return 0;
+}
+
 /** The `ɵsetClassMetadata(...)` statement for a class (not yet printed). */
 function buildSetClassMetadata(
   className: string,
@@ -2289,7 +2354,15 @@ function buildSetClassMetadata(
   complianceMode: boolean = false,
 ): o.Statement {
   const guards = complianceMode ? [] : classMeta.laterDeclarationReferences;
-  const decoratorObjs = decorators.map(
+  const sortedDecorators =
+    decorators.length > 1
+      ? [...decorators].sort(
+          (a, b) =>
+            getDecoratorSourceOffset(a, classMeta, s.original) -
+            getDecoratorSourceOffset(b, classMeta, s.original),
+        )
+      : decorators;
+  const decoratorObjs = sortedDecorators.map(
     ({decoratorName, argsSpan, preservedDecoratorProperties, resourceOverride}) => {
       const props: {key: string; value: o.Expression; quoted: boolean}[] = [
         {key: 'type', value: o.variable(decoratorName), quoted: false},
@@ -2799,8 +2872,12 @@ function compileNgModuleDef(
       }
     }
 
-    // Sort targets to guarantee deterministic order of generated statements
-    scopeTargets.sort((a, b) => refName(a.component).localeCompare(refName(b.component)));
+    // Emit `ɵɵsetComponentScope` statements in the order the components appear in the NgModule's
+    // `declarations` array, matching ngtsc's `scopeRegistry.getRemoteScope(decl.node)` loop.
+    const ngModuleDecls = ngModule.declarations || [];
+    scopeTargets.sort(
+      (a, b) => ngModuleDecls.indexOf(a.component) - ngModuleDecls.indexOf(b.component),
+    );
 
     const coreSetScope = o.importExpr({
       moduleName: '@angular/core',
@@ -3223,50 +3300,4 @@ function templateDiagnosticLocation(
   // `template` expression. `NgDiagnostic` can carry neither a synthetic file nor related
   // information, so only the expression location is reported.
   return {filePath, span: {start: expressionSpan.start, end: expressionSpan.end}};
-}
-
-function parseComponentTemplate(
-  component: nga.ComponentMetadata,
-  filePath: string,
-  content: string,
-  options: Partial<ParseTemplateOptions> = {},
-): ParsedComponentTemplate {
-  const parseOptions: Partial<ParseTemplateOptions> = {
-    ...options,
-    preserveWhitespaces: component.preserveWhitespaces ?? options.preserveWhitespaces ?? false,
-  };
-  const diagParseOptions: Partial<ParseTemplateOptions> = {
-    ...options,
-    preserveWhitespaces: true,
-    preserveLineEndings: true,
-    preserveSignificantWhitespace: true,
-    leadingTriviaChars: [],
-  };
-
-  // A `template` literal is parsed out of this file's source text so its spans are offsets
-  // into it. An external template, or an inline one computed by any other expression, is parsed
-  // on its own: its spans are offsets into the template string (ngtsc's `external` and
-  // `indirect` source mappings).
-  // Mirroring ngtsc's `parseExtractedTemplate`, also parse a second, span-faithful copy
-  // (`diagNodes`: whitespace, line endings and leading trivia preserved) for type-checking,
-  // diagnostics, and indexing.
-  const contentSpan = component.templateContentSpan;
-  if (component.templateUrl == null && contentSpan != null) {
-    const parsed = parseDirectInlineTemplate(content, filePath, contentSpan, parseOptions);
-    const diagNodes = parseDirectInlineTemplate(
-      content,
-      filePath,
-      contentSpan,
-      diagParseOptions,
-    ).nodes;
-    return {...parsed, diagNodes};
-  }
-
-  // The URL identifies the file the spans are offsets into, which for an external template is
-  // the template file itself (as in ngtsc's `extractTemplate`).
-  const templateStr = component.template || '';
-  const templateUrl = component.templateUrl?.resolvedPath ?? filePath;
-  const parsed = parseTemplate(templateStr, templateUrl, parseOptions);
-  const diagNodes = parseTemplate(templateStr, templateUrl, diagParseOptions).nodes;
-  return {...parsed, diagNodes};
 }
