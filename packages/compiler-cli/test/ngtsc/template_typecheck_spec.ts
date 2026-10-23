@@ -2509,14 +2509,17 @@ runInEachFileSystem(() => {
         export class Module {}
       `,
       );
-      const diags = env.driveDiagnostics();
-      expect(diags.length).toEqual(2);
-      expect(getSourceCodeForDiagnostic(diags[0])).toEqual('y');
-      expect(getSourceCodeForDiagnostic(diags[1])).toEqual('y = !y');
-      expect(diags[0].messageText).toEqual(`Type 'false' is not assignable to type 'true'.`);
-      expect(diags[1].messageText).toEqual(
-        `Cannot use variable 'y' as the left-hand side of an assignment expression. Template variables are read-only.`,
-      );
+      const diags = env
+        .driveDiagnostics()
+        .map((d) => [getSourceCodeForDiagnostic(d), d.messageText])
+        .sort(([, a], [, b]) => (a as string).localeCompare(b as string));
+      expect(diags).toEqual([
+        [
+          'y = !y',
+          `Cannot use variable 'y' as the left-hand side of an assignment expression. Template variables are read-only.`,
+        ],
+        ['y', `Type 'false' is not assignable to type 'true'.`],
+      ]);
     });
 
     it('should detect an illegal write to a template variable through update operators', () => {
@@ -4148,6 +4151,38 @@ runInEachFileSystem(() => {
           expect(diags.length).toBe(0);
         });
 
+        it('should widen the inferred literal type of readonly fields', () => {
+          env.write(
+            'test.ts',
+            `
+            import {Component, NgModule, Input, Directive} from '@angular/core';
+
+            @Component({
+              selector: 'blah',
+              template: '<div dir [showBadge]="true"></div>',
+              standalone: false,
+            })
+            export class FooCmp {}
+
+            @Directive({
+              selector: '[dir]',
+              standalone: false,
+            })
+            export class TestDir {
+              // Inferred as the literal type \`false\`; the binding must widen it to \`boolean\`.
+              @Input() readonly showBadge = false;
+            }
+
+            @NgModule({
+              declarations: [FooCmp, TestDir],
+            })
+            export class FooModule {}
+          `,
+          );
+          const diags = env.driveDiagnostics();
+          expect(diags.length).toBe(0);
+        });
+
         it('should produce diagnostics when assigning incorrect type to readonly, private, or protected fields', () => {
           env.write(
             'test.ts',
@@ -5482,7 +5517,10 @@ suppress
         `,
         );
 
-        const messages = env.driveDiagnostics().map((d) => d.messageText);
+        const messages = env
+          .driveDiagnostics()
+          .map((d) => d.messageText as string)
+          .sort((a, b) => a.localeCompare(b));
 
         // These messages are expected to refer to the native
         // typings since the inputs/outputs haven't been exposed.

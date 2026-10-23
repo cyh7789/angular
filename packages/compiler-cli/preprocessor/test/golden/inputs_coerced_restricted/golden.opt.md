@@ -19,14 +19,18 @@ function _tcb2(this: i0.AppComponent) {
   if (true) {
     var _t1 = null! as typeof i0.TestCoercedComponent.ngAcceptInputType_coercedByStatic; /*T:VAE*/
     _t1 /*1186,1201*/ = 'test' /*1204,1210*/; /*1185,1211*/
-    var _t2 = null! as string | null; /*T:VAE*/
+    var _t2 =
+      null! as typeof i0.TestCoercedComponent.ngAcceptInputType_coercedByTransform; /*T:VAE*/
     _t2 /*1219,1237*/ = 'test' /*1240,1246*/; /*1218,1247*/
     var _t3 /*T:DIR:0*/ /*1165,1442*/ = null! as i0.TestCoercedComponent; /*T:VAE*/
     var _t4 = null! as (typeof _t3)['privateInput']; /*T:VAE*/
+    null! as typeof _t3.privateInput; /*D:ignore*/ /*1255,1267*/
     _t4 /*1255,1267*/ = 'test' /*1270,1276*/; /*1254,1277*/
     var _t5 = null! as (typeof _t3)['protectedInput']; /*T:VAE*/
+    null! as typeof _t3.protectedInput; /*D:ignore*/ /*1285,1299*/
     _t5 /*1285,1299*/ = 'test' /*1302,1308*/; /*1284,1309*/
     var _t6 = null! as (typeof _t3)['readonlyInput']; /*T:VAE*/
+    null! as typeof _t3.readonlyInput; /*D:ignore*/ /*1317,1330*/
     _t6 /*1317,1330*/ = 'test' /*1333,1339*/; /*1316,1340*/
     _t3['literalInput'] /*1348,1360*/ = 'test' /*1363,1369*/; /*1347,1370*/
     _t3.signalWithTransform[i1.ɵINPUT_SIGNAL_BRAND_WRITE_TYPE] /*1378,1397*/ =

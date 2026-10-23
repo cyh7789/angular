@@ -9,6 +9,7 @@
 import {decode, encode, SourceMapMappings, SourceMapSegment} from '@jridgewell/sourcemap-codec';
 import {AbstractBoundTemplate, ParseTemplateOptions} from '@angular/compiler';
 import * as fsSync from 'node:fs';
+import {createRequire} from 'node:module';
 import * as path from 'node:path';
 import ts from 'typescript';
 
@@ -16,17 +17,18 @@ import {
   buildTypeCheckingConfig,
   HybridCompiler,
   IndexerBoundTemplate,
+  verifyCompilerOptions,
   WasmAnalyzer,
   type ClassEntity,
   type HostDirEntry,
   type HostFileStat,
   type LoadAnalyzerOptions,
   type NgDiagnostic,
+  type NgpCompilerOptions,
   type NgpTypeCheckingConfig,
   type WasmHostFs,
   type WasmInner,
 } from '../../../../preprocessor/api';
-import {createRequire} from 'node:module';
 import {exitCodeFromResult} from '../../../perform_compile';
 import {verifySupportedTypeScriptVersion} from '../../../typescript_support';
 import {CompilerOptions, CustomTransformers, UNKNOWN_ERROR_CODE} from '../../../transformers/api';
@@ -512,7 +514,7 @@ export function performNgpCompilationSync(params: {
     if (sf) {
       return sf;
     }
-    if (!fs.exists(fsPath)) {
+    if (!fs.exists(fsPath) || fs.lstat(fsPath).isDirectory()) {
       return undefined;
     }
     const content = fs.readFile(fsPath);
@@ -637,7 +639,13 @@ export function performNgpCompilationSync(params: {
       messageText: thrown.message,
     });
   }
-  if (!templateDiagnosticsOnly) {
+  const optionDiagnostics = verifyCompilerOptions(options as NgpCompilerOptions);
+  for (const ngDiag of optionDiagnostics) {
+    allDiagnostics.push(convertNgDiagnosticToTs(ngDiag, undefined));
+  }
+  const hasOptionErrors = optionDiagnostics.some((d) => d.category === 1);
+
+  if (!templateDiagnosticsOnly && !hasOptionErrors) {
     allDiagnostics.push(...tsProgram.getOptionsDiagnostics());
     if (optimize || !complianceMode) {
       allDiagnostics.push(...tsProgram.getGlobalDiagnostics());
@@ -667,9 +675,12 @@ export function performNgpCompilationSync(params: {
   const sortedDiagEntries = Array.from(compiler.diagnosticsMap.entries()).sort(([a], [b]) =>
     a < b ? -1 : a > b ? 1 : 0,
   );
-  for (const [diagPosixPath, ngDiags] of sortedDiagEntries) {
+  for (const [diagPosixPath, ngDiags] of hasOptionErrors ? [] : sortedDiagEntries) {
     for (const ngDiag of ngDiags) {
-      const origSf = getOriginalSourceFile(fromPosixPath(fs, ngDiag.filePath ?? diagPosixPath));
+      const targetPosixPath = ngDiag.filePath || diagPosixPath;
+      const origSf = targetPosixPath
+        ? getOriginalSourceFile(fromPosixPath(fs, targetPosixPath))
+        : undefined;
       allDiagnostics.push(
         convertNgDiagnosticToTs(ngDiag, origSf, (relatedPosixPath) =>
           getOriginalSourceFile(fromPosixPath(fs, relatedPosixPath)),
@@ -679,7 +690,9 @@ export function performNgpCompilationSync(params: {
   }
 
   // 3. Collect and map TCB semantic diagnostics from .ngtypecheck.ts files
-  for (const [tcbFsPath, {code: tcbCode, originFsPath}] of tcbFileMap.entries()) {
+  for (const [tcbFsPath, {code: tcbCode, originFsPath}] of hasOptionErrors
+    ? []
+    : tcbFileMap.entries()) {
     const tcbSf = tsProgram.getSourceFile(tcbFsPath);
     if (!tcbSf) {
       continue;
