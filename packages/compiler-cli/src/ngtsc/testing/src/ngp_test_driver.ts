@@ -330,6 +330,7 @@ export function performNgpCompilationSync(params: {
         compileNonExportedClasses: rawOpts['compileNonExportedClasses'] !== false,
         workspaceName: analyzerWorkspaceName,
         _useHostForImportGeneration: useHostForImportGeneration,
+        _angularCoreVersion: rawOpts['_angularCoreVersion'],
       },
       files: rootNames.map((r) => toPosixPath(fs.resolve(basePath, r))),
     });
@@ -360,18 +361,17 @@ export function performNgpCompilationSync(params: {
     useHostForImportGeneration,
   });
 
-  let compiler: HybridCompiler;
+  const optionDiagnostics = verifyCompilerOptions(options as NgpCompilerOptions);
+  let compiler: HybridCompiler | undefined;
+  let compilerInitError: Error | undefined;
   try {
     compiler = new HybridCompiler(analyzer, {
       optimize,
       tsconfigPath: posixTsconfigPath,
       virtualFiles,
       tcbConfig,
+      optionDiagnostics,
       templateParseOptions: {
-        enableI18nLegacyMessageIdFormat: options.enableI18nLegacyMessageIdFormat,
-        i18nNormalizeLineEndingsInICUs: options.i18nNormalizeLineEndingsInICUs,
-        preserveWhitespaces: options.preserveWhitespaces,
-        preserveSignificantWhitespace: options.i18nPreserveWhitespaceForLegacyExtraction ?? true,
         enableSelectorless: Boolean(rawOpts['_enableSelectorless']),
       },
       legacyOptionalChaining: Boolean(rawOpts['legacyOptionalChaining']),
@@ -402,8 +402,7 @@ export function performNgpCompilationSync(params: {
       complianceMode,
     });
   } catch (e) {
-    analyzer.close();
-    throw e;
+    compilerInitError = e as Error;
   }
 
   // Map of original AbsoluteFsPath -> preprocessed .ng.ts content
@@ -421,13 +420,13 @@ export function performNgpCompilationSync(params: {
   const processorThrownErrors: Array<{fsFilePath: AbsoluteFsPath; message: string}> = [];
 
   const chunks =
-    rootNames.length === 0
+    compiler === undefined || rootNames.length === 0
       ? []
       : optimize && !emitDeclarationOnly
         ? compiler.analyzeOptimizedSync()
         : compiler.analyzeSync();
   for (const chunk of chunks) {
-    const chunkContext = compiler.prepareChunkSync(chunk);
+    const chunkContext = compiler!.prepareChunkSync(chunk);
     for (const fileResult of chunk.files) {
       const posixFilePath = fileResult.filePath;
       const fsFilePath = fromPosixPath(fs, posixFilePath);
@@ -437,7 +436,7 @@ export function performNgpCompilationSync(params: {
       const originalContent = fs.readFile(fsFilePath);
       let processed;
       try {
-        processed = compiler.processFileSync(
+        processed = compiler!.processFileSync(
           posixFilePath,
           originalContent,
           (resPosixPath: string) => {
@@ -469,7 +468,7 @@ export function performNgpCompilationSync(params: {
         tcbFileMap.set(tcbFsPath, {code: processed.tcb.code, originFsPath: fsFilePath});
       }
 
-      const typeCheckIdMap = compiler.getTypeCheckIdMap(posixFilePath);
+      const typeCheckIdMap = compiler!.getTypeCheckIdMap(posixFilePath);
       if (typeCheckIdMap) {
         for (const cls of fileResult.classes) {
           const component = cls.component;
@@ -628,6 +627,17 @@ export function performNgpCompilationSync(params: {
       });
     }
   }
+  if (compilerInitError !== undefined) {
+    allDiagnostics.push({
+      category: ts.DiagnosticCategory.Error,
+      messageText: compilerInitError.message,
+      code: UNKNOWN_ERROR_CODE,
+      source: 'angular',
+      file: undefined,
+      start: undefined,
+      length: undefined,
+    });
+  }
   for (const thrown of processorThrownErrors) {
     const origSf = getOriginalSourceFile(thrown.fsFilePath);
     allDiagnostics.push({
@@ -639,11 +649,12 @@ export function performNgpCompilationSync(params: {
       messageText: thrown.message,
     });
   }
-  const optionDiagnostics = verifyCompilerOptions(options as NgpCompilerOptions);
-  for (const ngDiag of optionDiagnostics) {
-    allDiagnostics.push(convertNgDiagnosticToTs(ngDiag, undefined));
+  if (compiler) {
+    for (const ngDiag of compiler.optionDiagnostics) {
+      allDiagnostics.push(convertNgDiagnosticToTs(ngDiag, undefined));
+    }
   }
-  const hasOptionErrors = optionDiagnostics.some((d) => d.category === 1);
+  const hasOptionErrors = compiler?.optionDiagnostics.some((d) => d.category === 1);
 
   if (!templateDiagnosticsOnly && !hasOptionErrors) {
     allDiagnostics.push(...tsProgram.getOptionsDiagnostics());
@@ -672,9 +683,9 @@ export function performNgpCompilationSync(params: {
   // 2. Collect NGP analyzer & processor diagnostics from compiler.diagnosticsMap. Entries are
   // keyed by the analyzed file, but a diagnostic may point elsewhere (e.g. an NgModule cycle is
   // reported on the imported module's name), so prefer the diagnostic's own path.
-  const sortedDiagEntries = Array.from(compiler.diagnosticsMap.entries()).sort(([a], [b]) =>
-    a < b ? -1 : a > b ? 1 : 0,
-  );
+  const sortedDiagEntries = compiler
+    ? Array.from(compiler.diagnosticsMap.entries()).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    : [];
   for (const [diagPosixPath, ngDiags] of hasOptionErrors ? [] : sortedDiagEntries) {
     for (const ngDiag of ngDiags) {
       const targetPosixPath = ngDiag.filePath || diagPosixPath;
@@ -796,14 +807,14 @@ export function performNgpCompilationSync(params: {
   }
 
   if (closeAnalyzer) {
-    compiler.analyzer.close();
+    analyzer.close();
   }
 
   return {
     exitCode: exitCodeFromResult(allDiagnostics),
     diagnostics: allDiagnostics,
     tsProgram,
-    compiler,
+    compiler: compiler!,
     originalSourceFiles,
     preprocessedTsMap,
     emittedFiles,
@@ -1450,6 +1461,11 @@ export function createNgpTestCompiler(
   };
 
   const compilerInstance = {
+    getOptionDiagnostics(): ts.Diagnostic[] {
+      return currentResult.compiler.optionDiagnostics.map((d) =>
+        convertNgDiagnosticToTs(d, undefined),
+      );
+    },
     getDiagnosticsForFile(file: ts.SourceFile): ts.Diagnostic[] {
       const targetFsPath = fs.resolve(file.fileName);
       const relatedPaths = new Set<AbsoluteFsPath>([targetFsPath]);

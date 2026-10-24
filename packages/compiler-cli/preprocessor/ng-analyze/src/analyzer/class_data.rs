@@ -152,6 +152,7 @@ pub struct ClassData {
     pub di_issues: Vec<ValueIssue>,
     pub member_decorators: Vec<crate::DecoratedMemberMetadata>,
     pub later_declaration_references: Vec<oxc_span::Span>,
+    pub decorator_function_spans: Vec<oxc_span::Span>,
     pub top_level_references: Option<Vec<super::TopLevelReference>>,
     pub type_parameters: Option<Vec<TypeParameterData>>,
     pub has_ng_template_context_guard: bool,
@@ -1076,6 +1077,9 @@ pub struct ComponentData {
     /// Preserved copy of `@Component.imports` expression span, unaffected by same-file scope
     /// resolution. Required by local compilation mode for runtime dependency resolution.
     pub imports_factory_span: Option<oxc_span::Span>,
+    /// Syntactic span tree of `@Component.imports`, used to walk array literal elements in
+    /// lockstep with evaluated `imports` values when reporting element-level diagnostics.
+    pub imports_span_tree: Option<ExprSpanTree>,
     /// Diagnostics about the entries of a standalone component's `imports` (ngtsc's
     /// `validateStandaloneImports` and the `ModuleWithProviders` rejection of
     /// `validateAndFlattenComponentImports`), filled by Stage 2. Already in wire form because
@@ -1129,6 +1133,44 @@ pub struct ComponentImportEntryData {
     pub is_standalone: Option<bool>,
     pub is_potential_shared: bool,
     pub usage_span: Option<oxc_span::Span>,
+}
+
+/// Syntactic expression-span tree for `@Component.imports`, mirroring the `expr: ts.Expression`
+/// parameter threaded through `validateAndFlattenComponentImports` in ngtsc so element-level
+/// diagnostic spans can be recovered when traversing nested array expressions in lockstep with
+/// evaluated `ResolvedValue` arrays.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ExprSpanTree {
+    Leaf(oxc_span::Span),
+    Array {
+        span: oxc_span::Span,
+        elements: Vec<ExprSpanTree>,
+    },
+}
+
+impl ExprSpanTree {
+    pub fn from_expression(expr: &oxc_ast::ast::Expression<'_>) -> Self {
+        use oxc_span::GetSpan;
+        if let oxc_ast::ast::Expression::ArrayExpression(arr) = expr {
+            if arr.elements.iter().all(|el| el.as_expression().is_some()) {
+                return Self::Array {
+                    span: arr.span,
+                    elements: arr
+                        .elements
+                        .iter()
+                        .filter_map(|el| el.as_expression().map(Self::from_expression))
+                        .collect(),
+                };
+            }
+        }
+        Self::Leaf(expr.span())
+    }
+
+    pub fn span(&self) -> oxc_span::Span {
+        match self {
+            Self::Leaf(span) | Self::Array { span, .. } => *span,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -1410,6 +1452,7 @@ pub struct NgModuleData {
     /// Weak `@Service` accompanying this module.
     pub service: Option<ServiceData>,
     pub decorator_name: Option<String>,
+    pub is_jit: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -1614,7 +1657,7 @@ impl ClassData {
         let DecoratorData::NgModule(module) = &self.decorator else {
             return None;
         };
-        Some(module)
+        (!module.is_jit).then_some(module)
     }
 
     /// The directive-shaped part, when this class has one (components extend directives).
@@ -1979,7 +2022,9 @@ impl ClassData {
         for issue in &self.decorator_issues {
             push_issue(diagnostics, file_path, converter, issue);
         }
-        if self.directive_part().is_some_and(|d| d.is_jit) {
+        if self.directive_part().is_some_and(|d| d.is_jit)
+            || matches!(&self.decorator, DecoratorData::NgModule(m) if m.is_jit)
+        {
             return;
         }
         for issue in &self.di_issues {
@@ -2103,7 +2148,11 @@ impl ClassData {
         converter: &crate::utils::Utf8ToUtf16,
         diagnostics: &mut Vec<crate::NgDiagnostic>,
     ) {
-        if mode != WireMode::Semantic || d.declaring_ng_module.is_none() || d.selector.is_some() {
+        if mode != WireMode::Semantic
+            || d.standalone
+            || d.declaring_ng_module.is_none()
+            || d.selector.is_some()
+        {
             return;
         }
         let Some(class_name) = self.class_name.as_deref() else {
@@ -3545,9 +3594,13 @@ fn prepare_members(
         }
     }
 
-    // Signal queries first, then `first` queries, then the rest (stable within groups).
+    // Class member queries come before decorator `queries` metadata (`property_span.is_none()`):
+    // signal queries first, then `first` queries, then the rest, and finally `queries` metadata
+    // entries (stable within groups).
     let sort_key = |q: &QueryMetadata| {
-        if q.is_signal {
+        if q.property_span.is_none() {
+            3
+        } else if q.is_signal {
             0
         } else if q.first {
             1
@@ -3769,6 +3822,7 @@ impl ClassData {
                         .isolated_exports
                         .as_ref()
                         .map(|t| self.to_wire_isolated_tuple(t, cx)),
+                    is_jit: m.is_jit,
                 });
             }
             // Already projected via injectable_data()/service_data() above.
@@ -3781,7 +3835,8 @@ impl ClassData {
         let prepared = members
             .map(|m| prepare_members(m, cx.source_text, cx.converter))
             .unwrap_or_default();
-        let is_jit = members.is_some_and(|d| d.is_jit);
+        let is_jit = members.is_some_and(|d| d.is_jit)
+            || matches!(&self.decorator, DecoratorData::NgModule(m) if m.is_jit);
         // For JIT classes, decorators are preserved on source, so removal_spans is empty.
         let removal_spans: Vec<crate::types::metadata::SpanMetadata> = if is_jit {
             Vec::new()
@@ -3856,6 +3911,16 @@ impl ClassData {
                 .iter()
                 .map(|span| crate::types::metadata::SpanMetadata::new(*span, cx.converter))
                 .collect(),
+            decorator_function_spans: if self.decorator_function_spans.is_empty() {
+                None
+            } else {
+                Some(
+                    self.decorator_function_spans
+                        .iter()
+                        .map(|span| crate::types::metadata::SpanMetadata::new(*span, cx.converter))
+                        .collect(),
+                )
+            },
             top_level_references: self.top_level_references.as_ref().map(|references| {
                 references
                     .iter()
@@ -4581,6 +4646,7 @@ impl ClassData {
                     None,
                     None,
                 ),
+                DecoratorData::NgModule(m) if m.is_jit => return None,
                 DecoratorData::NgModule(_) => (ClassType::NgModule, None, None, None, None, None),
                 DecoratorData::Injectable(_) => {
                     (ClassType::Injectable, None, None, None, None, None)

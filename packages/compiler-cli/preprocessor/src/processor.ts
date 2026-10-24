@@ -116,6 +116,7 @@ interface HybridCompilerContext {
   enableTemplateSourceLocations?: boolean;
   onlyPublishPublicTypingsForNgModules?: boolean;
   forbidOrphanComponents?: boolean;
+  supportJitMode?: boolean;
   supportTestBed?: boolean;
   i18nUseExternalIds?: boolean;
   remoteScopedClasses?: Set<string>;
@@ -482,7 +483,7 @@ export function processFileSync(
 
     if (!className) continue;
 
-    if (component?.isJit || directive?.isJit) {
+    if (component?.isJit || directive?.isJit || ngModule?.isJit) {
       const coreNamespace = printer.getOrCreateNamespace('@angular/core');
       for (const input of inputs) {
         if (input.isSignal && input.propertySpan) {
@@ -1198,7 +1199,6 @@ export function processFileSync(
       const markNotDeferrable = (local: string | undefined) => {
         if (!canDeferDeps || local === undefined) return;
         eagerlyBoundNames.add(local);
-        eagerlyReferencedNames.add(local);
         deferredOnlyNames.delete(local);
       };
 
@@ -1439,6 +1439,7 @@ export function processFileSync(
         viewQueries: buildQueriesMap(viewQueries, content),
         host: buildHostMetadata(hostMetadata, hostBindings, hostListeners, className, {
           filePath,
+          sourceText: content,
           hostSpan: component.hostSpan,
           hostProperties: component.hostProperties,
           diagnostics: fileDiagnostics,
@@ -1449,9 +1450,21 @@ export function processFileSync(
         usesInheritance: classMeta.usesInheritance,
         controlCreate: null,
         exportAs: component.exportAs || null,
-        providers: component.providersSpan ? rawSlice(s, component.providersSpan, guards) : null,
+        providers: component.providersSpan
+          ? rawSlice(
+              s,
+              component.providersSpan,
+              guards,
+              ctx.isClosureCompilerEnabled ? classMeta.decoratorFunctionSpans : undefined,
+            )
+          : null,
         viewProviders: component.viewProvidersSpan
-          ? rawSlice(s, component.viewProvidersSpan, guards)
+          ? rawSlice(
+              s,
+              component.viewProvidersSpan,
+              guards,
+              ctx.isClosureCompilerEnabled ? classMeta.decoratorFunctionSpans : undefined,
+            )
           : null,
         isStandalone: standalone,
         isSignal: component.signals,
@@ -1566,6 +1579,7 @@ export function processFileSync(
         viewQueries: buildQueriesMap(viewQueries, content),
         host: buildHostMetadata(hostMetadata, hostBindings, hostListeners, className, {
           filePath,
+          sourceText: content,
           hostSpan: directive.hostSpan,
           hostProperties: directive.hostProperties,
           diagnostics: fileDiagnostics,
@@ -1576,7 +1590,14 @@ export function processFileSync(
         usesInheritance: classMeta.usesInheritance,
         controlCreate: null,
         exportAs: directive.exportAs || null,
-        providers: directive.providersSpan ? rawSlice(s, directive.providersSpan, guards) : null,
+        providers: directive.providersSpan
+          ? rawSlice(
+              s,
+              directive.providersSpan,
+              guards,
+              ctx.isClosureCompilerEnabled ? classMeta.decoratorFunctionSpans : undefined,
+            )
+          : null,
         isStandalone: standalone,
         isSignal: directive.signals,
         hostDirectives: buildHostDirectives(hostDirectives),
@@ -1749,6 +1770,7 @@ export function processFileSync(
         s,
         perComponentDeferredDeps,
         ctx.complianceMode ?? false,
+        ctx.isClosureCompilerEnabled ?? false,
       );
       compiledClass.classMetadataStmt = classMetadataStmt;
     }
@@ -2084,8 +2106,9 @@ function inlineDecoratorResources(
   override: NonNullable<DecoratorMetadata['resourceOverride']>,
   s: MagicString,
   guards: nga.SpanMetadata[],
+  functionSpans?: nga.SpanMetadata[],
 ): string {
-  const props = preservedProperties.map((span) => sliceGuarded(s, span, guards));
+  const props = preservedProperties.map((span) => sliceGuarded(s, span, guards, functionSpans));
   if (override.inlineTemplate !== null) {
     props.push(`template: ${JSON.stringify(override.inlineTemplate)}`);
   }
@@ -2150,9 +2173,22 @@ function sliceGuarded(
   s: MagicString | string,
   span: nga.SpanMetadata,
   guards: nga.SpanMetadata[],
+  functionSpans?: nga.SpanMetadata[],
 ): string {
   const source = typeof s === 'string' ? s : s.original;
   const insertions: SourceInsertion[] = [];
+  if (functionSpans) {
+    for (const fnSpan of functionSpans) {
+      if (
+        fnSpan.start >= span.start &&
+        fnSpan.end <= span.end &&
+        !(fnSpan.start === span.start && fnSpan.end === span.end)
+      ) {
+        insertions.push({position: fnSpan.start, text: '('});
+        insertions.push({position: fnSpan.end, text: ')'});
+      }
+    }
+  }
   if (typeof s !== 'string') {
     const debugInsertions = signalDebugNameInsertionsBySource.get(s);
     if (debugInsertions !== undefined) {
@@ -2191,8 +2227,9 @@ function rawSlice(
   s: MagicString | string,
   span: nga.SpanMetadata,
   guards: nga.SpanMetadata[],
+  functionSpans?: nga.SpanMetadata[],
 ): o.WrappedNodeExpr<RawSource> {
-  return new o.WrappedNodeExpr(new RawSource(sliceGuarded(s, span, guards), [span]));
+  return new o.WrappedNodeExpr(new RawSource(sliceGuarded(s, span, guards, functionSpans), [span]));
 }
 
 /**
@@ -2452,8 +2489,10 @@ function buildSetClassMetadata(
   s: MagicString,
   deferredDeps: R3DeferPerComponentDependency[] = [],
   complianceMode: boolean = false,
+  isClosureCompilerEnabled: boolean = false,
 ): o.Statement {
   const guards = complianceMode ? [] : classMeta.laterDeclarationReferences;
+  const functionSpans = isClosureCompilerEnabled ? classMeta.decoratorFunctionSpans : undefined;
   const sortedDecorators =
     decorators.length > 1
       ? [...decorators].sort(
@@ -2471,8 +2510,14 @@ function buildSetClassMetadata(
       if (argsSpan != null) {
         const inlineResources = resourceOverride && preservedDecoratorProperties;
         let argsStr = inlineResources
-          ? inlineDecoratorResources(preservedDecoratorProperties, resourceOverride, s, guards)
-          : sliceGuarded(s, argsSpan, guards);
+          ? inlineDecoratorResources(
+              preservedDecoratorProperties,
+              resourceOverride,
+              s,
+              guards,
+              functionSpans,
+            )
+          : sliceGuarded(s, argsSpan, guards, functionSpans);
         if (complianceMode) {
           // Match Angular compliance test formatting for single-line decorator object literals.
           argsStr = argsStr
@@ -2617,7 +2662,15 @@ function compileHmrUpdateModule(options: HmrUpdateModuleOptions): string | null 
   // The update callback replaces `ɵsetClassMetadata` outright, so it never defers dependencies.
   const classMetadata =
     decorators.length > 0 && ctx.supportTestBed !== false
-      ? buildSetClassMetadata(className, decorators, classMeta, s, [], ctx.complianceMode)
+      ? buildSetClassMetadata(
+          className,
+          decorators,
+          classMeta,
+          s,
+          [],
+          ctx.complianceMode,
+          ctx.isClosureCompilerEnabled,
+        )
       : null;
   const debugInfo = buildSetClassDebugInfo(
     className,
@@ -2744,9 +2797,12 @@ function compileNgModuleDef(
   // https://github.com/angular/angular/blob/e3ac727/packages/compiler-cli/src/ngtsc/annotations/ng_module/src/handler.ts#L566-L603
   // We reproduce "the raw node" by slicing the original source text at the captured span.
   const guards = ctx.complianceMode ? [] : (classMeta?.laterDeclarationReferences ?? []);
-  const rawExprFromSpan = (span: nga.SpanMetadata | undefined | null): o.Expression | null =>
+  const rawExprFromSpan = (
+    span: nga.SpanMetadata | undefined | null,
+    functionSpans?: nga.SpanMetadata[],
+  ): o.Expression | null =>
     span && content !== undefined
-      ? new o.WrappedNodeExpr(new RawSource(sliceGuarded(content, span, guards)))
+      ? new o.WrappedNodeExpr(new RawSource(sliceGuarded(content, span, guards, functionSpans)))
       : null;
 
   const rawExprsFromSpans = (
@@ -2875,7 +2931,9 @@ function compileNgModuleDef(
           // In JIT/linker mode scope information is emitted inline into `ɵɵdefineNgModule()`.
           selectorScopeMode: ctx.templateParseOptions?.linkerJitMode
             ? R3SelectorScopeMode.Inline
-            : R3SelectorScopeMode.SideEffect,
+            : ctx.supportJitMode === false
+              ? R3SelectorScopeMode.Omit
+              : R3SelectorScopeMode.SideEffect,
           bootstrap: mapToRefs(bootstrap),
           declarations: mapToRefs(declarations),
           imports: mapToRefs(imports),
@@ -3027,7 +3085,10 @@ function compileNgModuleDef(
       value: o.variable(className),
       type: o.variable(className),
     },
-    providers: rawExprFromSpan(ngModule.providersSpan),
+    providers: rawExprFromSpan(
+      ngModule.providersSpan,
+      ctx.isClosureCompilerEnabled ? classMeta?.decoratorFunctionSpans : undefined,
+    ),
     imports: injectorImportsExprs(),
   };
   const inj = compileInjector(injectorMeta);

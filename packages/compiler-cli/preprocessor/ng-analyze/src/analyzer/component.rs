@@ -221,6 +221,8 @@ fn parse_component_metadata<'a, Fs: ResourceResolverFs>(
                 data.imports_key_span = Some(p.key.span());
                 data.raw_imports_span = Some(p.value.span());
                 data.imports_factory_span = Some(p.value.span());
+                data.imports_span_tree =
+                    Some(crate::analyzer::ExprSpanTree::from_expression(&p.value));
 
                 data.imports = Some(Resolved::from_syntax(
                     evaluate_expression(&p.value, eval),
@@ -492,7 +494,11 @@ pub(crate) fn load_style_urls<Fs: ResourceResolverFs>(
                 string_literal_span,
             } => {
                 let Some(url) = url.get_optional() else {
-                    issues.push(ValueIssue::wrong_type(*span, "styleUrl must be a string"));
+                    issues.push(ValueIssue::wrong_type_of(
+                        *span,
+                        url.raw(),
+                        "styleUrl must be a string",
+                    ));
                     continue;
                 };
                 style_urls.push(load_style_url(
@@ -505,8 +511,9 @@ pub(crate) fn load_style_urls<Fs: ResourceResolverFs>(
             }
             StyleUrlSource::List { urls, span } => {
                 let Some(urls) = urls.get_optional() else {
-                    issues.push(ValueIssue::wrong_type(
+                    issues.push(ValueIssue::wrong_type_of(
                         *span,
+                        urls.raw(),
                         "styleUrls must be an array of strings",
                     ));
                     continue;

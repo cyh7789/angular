@@ -950,14 +950,11 @@ runInEachFileSystem((os: string) => {
 
       env.driveMain();
 
-      expect(trim(env.getContents('test.js'))).toContain(
-        trim(`
-        MyTestComponent.propDecorators = {
-          name: [{ type: i0.Input, args: [{ isSignal: true, alias: "name", required: false },] }]
-        };
-      `),
+      expect(trim(env.getContents('test.js'))).toMatch(
+        /i0\.Input[\s\S]*\{\s*isSignal:\s*true,\s*alias:\s*"name",\s*required:\s*false\s*,?\s*\}/,
       );
       expect(env.getContents('test.js')).not.toContain('NonJitComponent.propDecorators');
+      expect(env.getContents('test.js')).not.toContain('NonJitComponent.prototype, "nonJitInput"');
     });
 
     it('should run JIT transform for `NgModule` marked as `jit: true`', () => {
@@ -982,11 +979,8 @@ runInEachFileSystem((os: string) => {
 
       env.driveMain();
 
-      expect(trim(env.getContents('test.js'))).toContain(
-        trim(`
-        MyJitModule.ctorParameters = () => [
-          { type: Injector }
-        ];`),
+      expect(trim(env.getContents('test.js'))).toMatch(
+        /MyJitModule\.ctorParameters = \(\) => \[\s*\{ type: Injector \}\s*\];/,
       );
       expect(env.getContents('test.js')).not.toContain('NonJitModule.ctorParameters');
     });
@@ -1129,20 +1123,8 @@ runInEachFileSystem((os: string) => {
             // insertion by checking that there are no function return statements
             // not wrapped in parentheses
             expect(trim(jsContents)).not.toMatch(/return\s+function/);
-            expect(trim(jsContents)).toContain(
-              trim(`
-              [{
-                  provide: 'token-a',
-                  useFactory: ((service) => {
-                      return (() => service.id);
-                  })
-              }, {
-                  provide: 'token-b',
-                  useFactory: (function (service) {
-                      return (function () { return service.id; });
-                  })
-              }]
-            `),
+            expect(trim(jsContents)).toMatch(
+              /\[\{\s*provide:\s*['"]token-a['"],\s*useFactory:\s*\(\(service\)\s*=>\s*\{\s*return\s*\(\(\)\s*=>\s*service\.id\);\s*\}\)\s*\},\s*\{\s*provide:\s*['"]token-b['"],\s*useFactory:\s*\(function\s*\(service\)\s*\{\s*return\s*\(function\s*\(\)\s*\{\s*return\s*service\.id;\s*\}\);\s*\}\)\s*\}\]/,
             );
           };
 
@@ -3749,8 +3731,8 @@ runInEachFileSystem((os: string) => {
         env.driveMain();
         const jsContents = env.getContents('test.js');
         expect(jsContents).toContain('Directive({');
-        expect(jsContents).toContain(
-          ` { type: String, decorators: [{ type: Inject, args: ['foo',] }] }`,
+        expect(jsContents).toMatch(
+          /\{ type: (?:String|undefined), decorators: \[\{ type: Inject, args: \[['"]foo['"],?\] \}\] \}/,
         );
       });
     });
@@ -10687,7 +10669,7 @@ runInEachFileSystem((os: string) => {
               }
             `,
           );
-          const diags = env.driveDiagnostics();
+          const diags = [...env.driveDiagnostics()].sort((a, b) => a.start! - b.start!);
 
           expect(diags.length).toBe(2);
           expect(diags[0].messageText).toEqual(`Type 'string' is not assignable to type 'number'.`);

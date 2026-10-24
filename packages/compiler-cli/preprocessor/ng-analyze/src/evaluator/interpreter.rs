@@ -108,10 +108,6 @@ pub fn evaluate_node_id(
     let interp = Interpreter::new(input);
     interp.current_node_id.set(Some(node_id));
     let ast_node = input.semantic.nodes().get_node(node_id);
-    // TODO(parity): a hole propagated inside a function body evaluated for a call (`function
-    // first(xs) { return xs[0]; }` called with an import) re-evaluates here without the call's
-    // parameter bindings, so it degrades to Dynamic where ngtsc, which evaluates the call
-    // afresh, produces the element.
     let scope = Scope::new();
     let span = ast_node.kind().span();
     let result = match ast_node.kind() {
@@ -229,6 +225,11 @@ pub fn evaluate_node_id(
     // hands back a dynamic anchored on a sub-expression instead of on `node_id` itself.
     result.map(|value| match value {
         ResolvedValue::Dynamic(dynamic) => interp.chain_dynamic_boxed(span, dynamic),
+        ResolvedValue::Incomplete(mut hole) if hole.span != span => {
+            hole.span = span;
+            hole.node_id = Some(node_id);
+            ResolvedValue::Incomplete(hole)
+        }
         other => other,
     })
 }
@@ -270,8 +271,40 @@ pub fn evaluate_symbol_declaration(
     input: &EvalInput<'_, '_>,
 ) -> ResolvedValue {
     let interp = Interpreter::new(input);
-    let span = input.semantic.symbol_declaration(symbol_id).kind().span();
+    let span = symbol_value_declaration(input.semantic, symbol_id)
+        .kind()
+        .span();
     interp.visit_declaration(symbol_id, span, &Scope::new())
+}
+
+fn symbol_value_declaration<'a>(
+    semantic: &'a Semantic<'a>,
+    symbol_id: oxc_semantic::SymbolId,
+) -> &'a oxc_semantic::AstNode<'a> {
+    let primary = semantic.symbol_declaration(symbol_id);
+    if matches!(
+        primary.kind(),
+        AstKind::Class(_)
+            | AstKind::Function(_)
+            | AstKind::TSEnumDeclaration(_)
+            | AstKind::VariableDeclarator(_)
+            | AstKind::FormalParameter(_)
+    ) {
+        return primary;
+    }
+    for redecl in semantic.scoping().symbol_redeclarations(symbol_id) {
+        let node = semantic.nodes().get_node(redecl.declaration);
+        if matches!(
+            node.kind(),
+            AstKind::Class(_)
+                | AstKind::Function(_)
+                | AstKind::TSEnumDeclaration(_)
+                | AstKind::VariableDeclarator(_)
+        ) {
+            return node;
+        }
+    }
+    primary
 }
 
 struct Interpreter<'a, 'e, 'i> {
@@ -747,6 +780,13 @@ impl<'a, 'e, 'i> Interpreter<'a, 'e, 'i> {
         // https://github.com/angular/angular/blob/1c9c453/packages/compiler-cli/src/ngtsc/partial_evaluator/src/interpreter.ts#L155-L158
         match result {
             ResolvedValue::Dynamic(dynamic) => self.chain_dynamic_boxed(outer_span, dynamic),
+            ResolvedValue::Incomplete(mut hole)
+                if scope.is_empty() && hole.span != outer_span =>
+            {
+                hole.span = outer_span;
+                hole.node_id = Some(expr.node_id());
+                ResolvedValue::Incomplete(hole)
+            }
             other => other,
         }
     }
@@ -1102,7 +1142,14 @@ impl<'a, 'e, 'i> Interpreter<'a, 'e, 'i> {
         }
 
         let flags = scoping.symbol_flags(symbol_id);
-        if flags.contains(SymbolFlags::Import) {
+        let has_local_decl = flags.intersects(
+            SymbolFlags::Class
+                | SymbolFlags::Function
+                | SymbolFlags::Variable
+                | SymbolFlags::RegularEnum
+                | SymbolFlags::ConstEnum,
+        );
+        if flags.contains(SymbolFlags::Import) && !has_local_decl {
             let local_name = scoping.symbol_name(symbol_id);
             let Some(imported) = self.input.import_map.get(local_name) else {
                 return self.dynamic(span, DynamicReason::UnknownIdentifier(name.to_string()));
@@ -1155,7 +1202,7 @@ impl<'a, 'e, 'i> Interpreter<'a, 'e, 'i> {
     ) -> ResolvedValue {
         let semantic = self.input.semantic;
         let name = semantic.scoping().symbol_name(symbol_id).to_string();
-        let decl_node = semantic.symbol_declaration(symbol_id);
+        let decl_node = symbol_value_declaration(semantic, symbol_id);
         match decl_node.kind() {
             AstKind::Class(class) => ResolvedValue::Reference(self.make_reference(
                 name,
@@ -1514,7 +1561,7 @@ impl<'a, 'e, 'i> Interpreter<'a, 'e, 'i> {
                 .scoping()
                 .get_root_binding(class_ref.name.as_str().into())?,
         };
-        let node = self.input.semantic.symbol_declaration(symbol_id);
+        let node = symbol_value_declaration(self.input.semantic, symbol_id);
         let AstKind::Class(class) = node.kind() else {
             return None;
         };
@@ -1679,7 +1726,7 @@ impl<'a, 'e, 'i> Interpreter<'a, 'e, 'i> {
         match reference.kind {
             DeclKind::Function => {
                 let symbol_id = self.reference_symbol_id(reference)?;
-                let node = self.input.semantic.symbol_declaration(symbol_id);
+                let node = symbol_value_declaration(self.input.semantic, symbol_id);
                 let AstKind::Function(function) = node.kind() else {
                     return None;
                 };

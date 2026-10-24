@@ -69,7 +69,15 @@ pub fn analyze_dts(
     for stmt in &program.body {
         match stmt {
             Statement::ExportDeclaration(export) => {
-                has_explicit_export = true;
+                if !export.export_kind().is_type()
+                    && !matches!(
+                        &export.declaration,
+                        Declaration::TSInterfaceDeclaration(_)
+                            | Declaration::TSTypeAliasDeclaration(_)
+                    )
+                {
+                    has_explicit_export = true;
+                }
                 if let Declaration::ClassDeclaration(class) = &export.declaration {
                     // `class_index` holds every `declare class`, exported or not (arm below); the export
                     // itself must be recorded here.
@@ -193,6 +201,25 @@ pub fn analyze_dts(
                 has_explicit_export = true;
             }
             Statement::ClassDeclaration(class) => {
+                // TypeScript's parser recovers from `declare export class` (TS1029) by treating the
+                // class as exported, whereas `oxc_parser` drops the misplaced `export` modifier and
+                // produces a `Statement::ClassDeclaration` with `declare: true`.
+                let is_declare_export = class.declare
+                    && source_text
+                        .get(class.span.start as usize..class.body.span.start as usize)
+                        .is_some_and(|header| {
+                            header.split_whitespace().any(|tok| tok == "export")
+                        });
+                if is_declare_export {
+                    has_explicit_export = true;
+                    if let Some(id) = &class.id {
+                        local_aliases.push(LocalExportAlias {
+                            exported_name: id.name.to_string(),
+                            local_name: id.name.to_string(),
+                            is_type: false,
+                        });
+                    }
+                }
                 let symbol_id = class
                     .id
                     .as_ref()
@@ -220,15 +247,19 @@ pub fn analyze_dts(
         }
     }
 
-    // In TypeScript's binder, a `.d.ts` module with no explicit `export` statements implicitly
+    // In TypeScript's binder, a `.d.ts` module with no explicit value `export` statements implicitly
     // exports all of its top-level declarations.
     if !has_explicit_export {
-        for reg in &registrations {
-            local_aliases.push(LocalExportAlias {
-                exported_name: reg.class_name.clone(),
-                local_name: reg.class_name.clone(),
-                is_type: false,
-            });
+        for stmt in &program.body {
+            if let Statement::ClassDeclaration(class) = stmt {
+                if let Some(id) = &class.id {
+                    local_aliases.push(LocalExportAlias {
+                        exported_name: id.name.to_string(),
+                        local_name: id.name.to_string(),
+                        is_type: false,
+                    });
+                }
+            }
         }
     }
 
@@ -482,6 +513,7 @@ fn extract_class_metadata(
             injectable: None,
             service: None,
             decorator_name: None,
+            is_jit: false,
         });
 
         let class_data = ClassData {
@@ -501,6 +533,7 @@ fn extract_class_metadata(
             di_issues: Vec::new(),
             member_decorators: Vec::new(),
             later_declaration_references: Vec::new(),
+            decorator_function_spans: Vec::new(),
             top_level_references: None,
             type_parameters: None,
             has_ng_template_context_guard: false,
@@ -699,6 +732,7 @@ fn extract_class_metadata(
             di_issues: Vec::new(),
             member_decorators: Vec::new(),
             later_declaration_references: Vec::new(),
+            decorator_function_spans: Vec::new(),
             top_level_references: None,
             type_parameters: raw_type_parameters.map(|extracted| extracted.params),
             has_ng_template_context_guard,
